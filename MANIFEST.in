@@ -1,0 +1,4 @@
+#----------------------- MANIFEST.in file for TBNN-s package ---------------------------#
+
+include LICENSE
+include README.md

@@ -1,0 +1,9 @@
+# ------------------------------ requirements.txt file ---------------------------------#
+# This file contains all the libraries that must be installed (and their versions) for 
+# the current distribution of RaFoFC to work correctly.
+
+# This is an implicit value, here for clarity
+--index-url https://pypi.python.org/simple/
+
+# List of python libraries to install
+tensorflow>=1.13.1
