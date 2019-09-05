@@ -6,19 +6,20 @@ diffusivity for turbulent mixing applications.
 """
 
 # ------------ Import statements
+import tensorflow as tf
 import numpy as np
-import os
 import joblib
 import time
-import tensorflow as tf
 from tbnns.data_batcher import Batch, BatchGenerator
 from tbnns import constants
 from tbnns import utils
 
+# Run this to suppress gnarly warnings/info messages from tensorflow
+utils.suppressWarnings()
 
-class TBNN_S(object):
+class TBNNS(object):
     """
-    This class contains definitions and methods needed for the TBNN_S class.
+    This class contains definitions and methods needed for the TBNN-s class.
     """
     
     def __init__(self, FLAGS, saver_path=None, features_mean=None, features_std=None):
@@ -103,18 +104,20 @@ class TBNN_S(object):
         """
         
         # Creates the first hidden state from the inputs
-        fc1 = FullyConnected(self.FLAGS['num_neurons'], self.drop_prob, name="1")
+        fc1 = utils.FullyConnected(self.FLAGS['num_neurons'], self.drop_prob, name="1")
         hd1 = fc1.build(self.x_features)
         
         hd_list = [hd1, ] # list of all hidden states
         
         # Creates all other hidden states
         for i in range(self.FLAGS['num_layers']-1):
-            fc = FullyConnected(self.FLAGS['num_neurons'], self.drop_prob, name=str(i+2))
+            fc = utils.FullyConnected(self.FLAGS['num_neurons'], self.drop_prob,
+                                      name=str(i+2))
             hd_list.append(fc.build(hd_list[-1]))
         
         # Go from last hidden state to the outputs (g in this case)
-        fc_last = FullyConnected(self.FLAGS['num_bases'], self.drop_prob, relu=False, name="last")
+        fc_last = utils.FullyConnected(self.FLAGS['num_bases'], self.drop_prob, 
+                                       relu=False, name="last")
         self.g = fc_last.build(hd_list[-1])
 
     
@@ -123,7 +126,7 @@ class TBNN_S(object):
         with tf.variable_scope("bases"):
         
             # shape of [None,num_bases,3,3]    
-            mult_bas = tf.multiply(tf.reshape(self.g, shape=[-1,self.FLAGS['num_bases'],1,1]), 
+            mult_bas = tf.multiply(tf.reshape(self.g,shape=[-1,self.FLAGS['num_bases'],1,1]), 
                                    self.tensor_basis) 
             
             # shape of [None,3,3]            
@@ -133,7 +136,7 @@ class TBNN_S(object):
             gradc = tf.expand_dims(self.gradc, -1)
 
             # shape of [None, 3]
-            self.uc_predicted = -1.0 * tf.expand_dims(self.eddy_visc,-1) * tf.squeeze(tf.matmul(self.diffusivity, gradc))
+            self.uc_predicted = -1.0*tf.expand_dims(self.eddy_visc,-1)*tf.squeeze(tf.matmul(self.diffusivity, gradc))
         
 
     def addLoss(self):
@@ -261,12 +264,11 @@ class TBNN_S(object):
             np.random.shuffle(idx_tot)
             idx = idx_tot[0:N]
             batch_gen = BatchGenerator(DEV_BATCH_SIZE, x_features[idx,:], 
-                                       tensor_basis[idx,:,:,:], 
-                                       uc[idx,:], gradc[idx,:],
-                                       eddy_visc[idx])
+                                       tensor_basis[idx,:,:,:], uc[idx,:], 
+                                       gradc[idx,:], eddy_visc[idx])
         else:
-            batch_gen = BatchGenerator(DEV_BATCH_SIZE, x_features, tensor_basis, 
-                                       uc, gradc, eddy_visc)       
+            batch_gen = BatchGenerator(DEV_BATCH_SIZE, x_features, tensor_basis, uc,
+                                      gradc, eddy_visc)       
         
         # Iterate through all batches of data
         batch = batch_gen.nextBatch()        
@@ -324,77 +326,12 @@ class TBNN_S(object):
         #print("Computed diffusivity over {} examples in {:.2f}s".format(N,toc-tic))
         
         if clean:
-            total_diff, total_g = self.cleanDiffusivity(total_diff, total_g, test_inputs, N_std)
+            total_diff, total_g = utils.cleanDiffusivity(total_diff, total_g, test_inputs, N_std)
         
-        return total_diff, total_g
-        
-    
-    def cleanDiffusivity(self, diff, g, test_inputs, N_std, PR_T=0.85):
-        
-        print("Cleaning predicted diffusivity... ", end="", flush=True)
-        tic = time.time()
-        
-        # Here, make sure that there is no input more or less than N_std away
-        # from the mean. The mean and standard deviation used are from the 
-        # training data (which are set to 0 and 1 respectively)
-        mask_extr = (np.amax(test_inputs, axis=1) > N_std) + (np.amin(test_inputs, axis=1) < -N_std)
-        num_extr = np.sum(mask_extr) 
-        diff, g = applyMask(diff, g, mask_extr, PR_T)         
-        
-        # Here, make sure that no eigenvalues have a negative real part. 
-        # If they did, an unstable model is produced.
-        eig_all, _ = np.linalg.eig(diff)
-        t = np.amin(np.real(eig_all), axis=1) # minimum real part of eigenvalues
-        mask_eig = t < 0
-        num_eig = np.sum(mask_eig)
-        avg_negative_eig = 0
-        if num_eig > 0:
-            avg_negative_eig = np.mean(t[mask_eig])        
-        diff, g = applyMask(diff, g, mask_eig, PR_T)
-        
-        # Here, make sure that no diffusivities have negative diagonals 
-        # If they did, an unstable model is produced.
-        mask_neg = (diff[:,0,0] < 0) + (diff[:,1,1] < 0) + (diff[:,2,2] < 0)
-        num_neg = np.sum(mask_neg)        
-        avg_neg_diff_x = 0
-        num_neg_diff_x = np.sum(diff[:,0,0]<0)
-        if num_neg_diff_x > 0:
-            avg_neg_diff_x = np.mean(diff[diff[:,0,0]<0,0,0])
-        avg_neg_diff_y = 0
-        num_neg_diff_y = np.sum(diff[:,1,1]<0)
-        if num_neg_diff_y > 0:
-            avg_neg_diff_y = np.mean(diff[diff[:,1,1]<0,1,1])
-        avg_neg_diff_z = 0
-        num_neg_diff_z = np.sum(diff[:,2,2]<0)
-        if num_neg_diff_z > 0:
-            avg_neg_diff_z = np.mean(diff[diff[:,2,2]<0,2,2])                  
-        diff, g = applyMask(diff, g, mask_neg, PR_T)        
-        
-        # Calculate minimum real part of eigenvalue and minimum diagonal entry 
-        # after cleaning
-        eig_all, _ = np.linalg.eig(diff)
-        min_eig = np.amin(np.real(eig_all)) # minimum real part of any eigenvalue
-        min_diag = np.amin(np.concatenate((diff[:,0,0], diff[:,1,1], diff[:,2,2])))        
-        
-        # Print information        
-        toc = time.time()
-        print("Done! It took {:.1f}s".format(toc-tic), flush=True)
-        print("{:.3f}% of points were cleaned due to outlier inputs."\
-            .format(100.0*num_extr/diff.shape[0]), flush=True)
-        print("{:.3f}% of points were cleaned due to negative eigenvalues (avg: {:.2f})."\
-            .format(100.0*num_eig/diff.shape[0], avg_negative_eig), flush=True)
-        print("{:.3f}% of points were cleaned due to negative diagonal diffusivities:".format(100.0*num_neg/diff.shape[0]), flush=True)
-        print("\t x: {:.3f}% (avg={:.2f}), y: {:.3f}% (avg={:.2f}), z: {:.3f}% (avg={:.2f})"\
-            .format(100.0*num_neg_diff_x/diff.shape[0], avg_neg_diff_x,
-                    100.0*num_neg_diff_y/diff.shape[0], avg_neg_diff_y,
-                    100.0*num_neg_diff_z/diff.shape[0], avg_neg_diff_z), flush=True)
-        print("In cleaned diffusivity: minimum eigenvalue real part = {:g}, minimum diagonal entry = {:g}"\
-            .format(min_eig, min_diag), flush=True)
-        
-        return diff, g
+        return total_diff, total_g   
         
     
-    def train(self, session, num_epochs, path_to_save,
+    def train(self, session, num_epochs, path_to_saver,
               train_inputs, train_tensor_basis, train_uc, train_gradc, train_eddy_visc,
               dev_inputs, dev_tensor_basis, dev_uc, dev_gradc, dev_eddy_visc,
               update_stats=True, initialize=True, early_stop=10, subsample_devloss=None):
@@ -404,7 +341,7 @@ class TBNN_S(object):
         
         print("Training...", flush=True)
         
-        self.saver_path = path_to_save
+        self.saver_path = path_to_saver
         
         # If this is true, initialize all global variables
         if initialize:
@@ -519,45 +456,6 @@ class TBNN_S(object):
         print("This model has {} trainable parameters. They are:".format(len(params)))
         for i, v in enumerate(params):
             print("{}: {}".format(i, v.name))
-            print("\t shape: {} size: {}".format(v.shape, np.prod(v.shape)))        
+            print("\t shape: {} size: {}".format(v.shape, np.prod(v.shape))) 
         
         
-class FullyConnected(object):
-    """    
-    """
-
-    def __init__(self, out_size, drop_prob, relu=True, name=""):
-        """               
-        """
-           
-        self.out_size = out_size
-        self.drop_prob = drop_prob
-        self.relu = relu
-        self.name = name # this is used to create different variable contexts
-        
-    def build(self, layer_inputs):
-        """
-        Inputs:          
-
-        Returns:          
-        """
-        with tf.variable_scope("FC_"+self.name):
-        
-            out = tf.contrib.layers.fully_connected(layer_inputs, self.out_size, 
-                                                    activation_fn=None)
-            if self.relu:                
-                out = tf.nn.relu(out)
-                out = tf.nn.dropout(out, rate=self.drop_prob) # Apply dropout
-
-            return out
-            
-            
-def applyMask(diff, g, mask, PR_T):
-    diff[mask,:,:]=0
-    diff[mask,0,0]=1.0/PR_T
-    diff[mask,1,1]=1.0/PR_T
-    diff[mask,2,2]=1.0/PR_T
-    g[mask, :] = 0;
-    g[mask, 0] = 1.0/PR_T;
-
-    return diff, g
