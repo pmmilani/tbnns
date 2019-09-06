@@ -9,6 +9,7 @@ import os
 import tensorflow as tf
 import time
 import numpy as np
+from tbnns import constants
 
 class FullyConnected(object):
     """    
@@ -40,17 +41,20 @@ class FullyConnected(object):
             return out
 
             
-def cleanDiffusivity(diff, g, test_inputs, N_std, PR_T=0.85):
+def cleanDiffusivity(diff, g, test_inputs, n_std):
+        
+        if n_std is None:
+            n_std = constants.N_STD
         
         print("Cleaning predicted diffusivity... ", end="", flush=True)
         tic = time.time()
         
-        # Here, make sure that there is no input more or less than N_std away
+        # Here, make sure that there is no input more or less than n_std away
         # from the mean. The mean and standard deviation used are from the 
         # training data (which are set to 0 and 1 respectively)
-        mask_extr = (np.amax(test_inputs, axis=1) > N_std) + (np.amin(test_inputs, axis=1) < -N_std)
+        mask_extr = (np.amax(test_inputs, axis=1) > n_std) + (np.amin(test_inputs, axis=1) < -n_std)
         num_extr = np.sum(mask_extr) 
-        diff, g = applyMask(diff, g, mask_extr, PR_T)         
+        diff, g = applyMask(diff, g, mask_extr)         
         
         # Here, make sure that no eigenvalues have a negative real part. 
         # If they did, an unstable model is produced.
@@ -61,7 +65,7 @@ def cleanDiffusivity(diff, g, test_inputs, N_std, PR_T=0.85):
         avg_negative_eig = 0
         if num_eig > 0:
             avg_negative_eig = np.mean(t[mask_eig])        
-        diff, g = applyMask(diff, g, mask_eig, PR_T)
+        diff, g = applyMask(diff, g, mask_eig)
         
         # Here, make sure that no diffusivities have negative diagonals 
         # If they did, an unstable model is produced.
@@ -79,7 +83,7 @@ def cleanDiffusivity(diff, g, test_inputs, N_std, PR_T=0.85):
         num_neg_diff_z = np.sum(diff[:,2,2]<0)
         if num_neg_diff_z > 0:
             avg_neg_diff_z = np.mean(diff[diff[:,2,2]<0,2,2])                  
-        diff, g = applyMask(diff, g, mask_neg, PR_T)        
+        diff, g = applyMask(diff, g, mask_neg)        
         
         # Calculate minimum real part of eigenvalue and minimum diagonal entry 
         # after cleaning
@@ -105,13 +109,13 @@ def cleanDiffusivity(diff, g, test_inputs, N_std, PR_T=0.85):
         return diff, g
 
         
-def applyMask(diff, g, mask, PR_T):
+def applyMask(diff, g, mask):
     diff[mask,:,:] = 0
-    diff[mask,0,0] = 1.0/PR_T
-    diff[mask,1,1] = 1.0/PR_T
-    diff[mask,2,2] = 1.0/PR_T
+    diff[mask,0,0] = 1.0/constants.PR_T
+    diff[mask,1,1] = 1.0/constants.PR_T
+    diff[mask,2,2] = 1.0/constants.PR_T
     g[mask, :] = 0;
-    g[mask, 0] = 1.0/PR_T;
+    g[mask, 0] = 1.0/constants.PR_T;
 
     return diff, g
     
