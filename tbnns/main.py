@@ -9,14 +9,14 @@ diffusivity for turbulent mixing applications.
 import tensorflow as tf
 import numpy as np
 import joblib
-import time
+import timeit
 from tbnns.data_batcher import Batch, BatchGenerator
 from tbnns import constants
 from tbnns import utils
 
-# Run this to suppress gnarly warnings/info messages from tensorflow
 utils.suppressWarnings()
 
+# Run this to suppress gnarly warnings/info messages from tensorflow
 class TBNNS(object):
     """
     This class contains definitions and methods needed for the TBNN-s class.
@@ -263,7 +263,7 @@ class TBNNS(object):
     
     
     def getTotalLoss(self, session, x_features, tensor_basis, uc, gradc,
-                     eddy_visc, normalize=True, subsample=None):
+                     eddy_visc, normalize=True, downsample=None):
         """
         This method takes in a whole dataset and computes the average loss on it.
         
@@ -281,7 +281,7 @@ class TBNNS(object):
                         shape (num_points)
         normalize -- optional argument, boolean flag saying whether to normalize the 
                      features before feeding them to the neural network. True by default.
-        subsample -- optional argument, ratio of points to use of the overall dataset.
+        downsample -- optional argument, ratio of points to use of the overall dataset.
                      If None, deactivate (and use all points). Must be between 0 and 1 
                      otherwise.
         Returns:
@@ -298,21 +298,11 @@ class TBNNS(object):
         if self.features_mean is not None and normalize:
             x_features = (x_features - self.features_mean)/self.features_std        
         
-        # Initialize batch generator (either by subsampling or not)
-        batch_gen = None
-        if subsample is not None:
-            assert subsample > 0 and subsample <= 1.0, \
-                                "subsample must be between 0 and 1!"
-            idx_tot = np.arange(num_points)
-            num_points = int(num_points*subsample)            
-            np.random.shuffle(idx_tot)
-            idx = idx_tot[0:num_points]
-            batch_gen = BatchGenerator(constants.TEST_BATCH_SIZE, x_features[idx,:], 
-                                       tensor_basis[idx,:,:,:], uc[idx,:], 
-                                       gradc[idx,:], eddy_visc[idx])
-        else:
-            batch_gen = BatchGenerator(constants.TEST_BATCH_SIZE, x_features, 
-                                       tensor_basis, uc, gradc, eddy_visc)       
+        # Initialize batch generator (either by subsampling or not)        
+        idx = utils.downsampleIdx(num_points, downsample)
+        batch_gen = BatchGenerator(constants.TEST_BATCH_SIZE, x_features[idx,:], 
+                                   tensor_basis[idx,:,:,:], uc[idx,:], 
+                                   gradc[idx,:], eddy_visc[idx])             
         
         # Iterate through all batches of data
         batch = batch_gen.nextBatch()        
@@ -330,7 +320,8 @@ class TBNNS(object):
      
      
     def getTotalDiffusivity(self, session, test_x_features, test_tensor_basis, 
-                            normalize=True, clean=True, n_std=None):
+                            normalize=True, clean=True, n_std=None, prt_default=None, 
+                            gamma_min=None):
         """
         This method takes in a whole test set and computes the diffusivity matrix on it.
         
@@ -348,6 +339,13 @@ class TBNNS(object):
                  characterize a point as an outlier. This is passed to the cleaning 
                  function, which sets a default value for all outlier points. By default
                  it is None, which means that the value in constants.py is used instead
+        prt_default -- optional argument, default turbulent Prandtl number to use
+                       whenever the output diffusivity is cleaned. If None, it will read
+                       from constants.py
+        gamma_min -- optional argument, minimum value of gamma = diffusivity/turbulent 
+                     viscosity allowed. Used to clean values that are positive but too
+                     close to zero. If None is passed, default value is read from 
+                     constants.py
         
         Returns:
         total_diff -- dimensionless diffusivity predicted, numpy array of shape 
@@ -367,20 +365,21 @@ class TBNNS(object):
                     
         # Initialize batch generator. We do not call reset() to avoid shuffling the batch
         batch_gen = BatchGenerator(constants.TEST_BATCH_SIZE, test_x_features, 
-                                   test_tensor_basis)                                  
+                                   test_tensor_basis)                      
         
         # Iterate through all batches of data
-        batch = batch_gen.nextBatch()        
+        batch = batch_gen.nextBatch()
         while batch is not None:
             n_batch = batch.x_features.shape[0] # number of points in this batch
             total_diff[i:i+n_batch,:,:], total_g[i:i+n_batch] = self.getDiffusivity(session, batch)
-            i += n_batch            
-            batch = batch_gen.nextBatch()      
+            i += n_batch
+            batch = batch_gen.nextBatch()
         
         # Clean the resulting diffusivity and g arrays
         if clean:
             total_diff, total_g = utils.cleanDiffusivity(total_diff, total_g,
-                                                         test_x_features, n_std)
+                                                         test_x_features, n_std, 
+                                                         prt_default, gamma_min)
         
         return total_diff, total_g   
         
@@ -420,7 +419,7 @@ class TBNNS(object):
         
         # This loop goes over the epochs
         for ep in range(num_epochs):
-            tic = time.time()
+            tic = timeit.default_timer()
         
             batch_gen.reset() # reset batch generator before each epoch
         
@@ -457,7 +456,7 @@ class TBNNS(object):
                 
                 batch = batch_gen.nextBatch()
                 
-            toc = time.time()
+            toc = timeit.default_timer()
             print("---------Epoch {} took {:.2f}s".format(ep,toc-tic), flush=True)
 
             if to_break:

@@ -22,3 +22,8 @@ PR_T = 0.85
 # than N_STD or less than -N_STD, it means it is very different from
 # points seen at training time and therefore won't be used
 N_STD = 20
+
+# Minimum value of gamma (or 1/Pr_t) when we clean the vectorial diffusivity
+# produced. Higher values are more stable, but more intrusive. Must be
+# greater than zero.
+GAMMA_MIN = 0.01
