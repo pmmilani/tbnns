@@ -1,4 +1,4 @@
-#------------------------- setup.py file for RaFoFC package ----------------------------#
+#------------------------- setup.py file for TBNN-s package ----------------------------#
 # https://stackoverflow.com/questions/1471994/what-is-setup-py/23998536
 
 # Note: this installs the requirements needed to the package, but this needs setuptools
@@ -11,13 +11,14 @@ with open("README.md", 'r') as f:
 
 setup(
    name='tbnns',
-   version='1.0.0',
-   description='TBNN-s v1.0.0 - Tensor Basis Neural Network for Scalar Mixing',
+   version='0.1.0',
+   description='TBNN-s - Tensor Basis Neural Network for Scalar Mixing',
    license='Apache',
    long_description=long_description,
    author='Pedro M. Milani',
    author_email='pmmilani@stanford.edu',
+   url="https://github.com/pmmilani/tbnns.git",
    packages=['tbnns'],  # same as name
    install_requires=['tensorflow>=1.13.1', 'joblib'], # dependencies
-   include_package_data=True      
+   python_requires='>=3.6',
 )

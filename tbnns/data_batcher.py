@@ -45,7 +45,7 @@ class BatchGenerator(object):
     """
     
     def __init__(self, batch_size, x_features, tensor_basis, 
-                 uc=None, train_list=None):
+                 uc=None, gradc=None, eddy_visc=None):
         """
         Constructor method, which takes in batch size and full arrays.
         
@@ -54,18 +54,16 @@ class BatchGenerator(object):
         x_features -- numpy array of shape (n_total, n_features).
         tensor_basis -- numpy array of shape (n_total, n_basis, 3, 3).
         uc -- numpy array of shape (n_total, 3). Optional, only at training time.
-        train_list -- a list of numpy arrays whose first axis is n_total long.
-                      This contains all the extra information that is needed to
-                      train the model. Optional, only at training time.
+        gradc -- numpy array of shape (num_total, 3). Optional, only at training time.
+        eddy_visc -- numpy array of shape (num_total,). Optional, only at training time.
         """
         
         # Data that will be used in the batches
         self.x_features = x_features
         self.tensor_basis = tensor_basis
         self.uc = uc
-        if train_list is not None:
-            self.gradc = train_list[0]
-            self.eddy_visc = train_list[1] 
+        self.gradc = gradc
+        self.eddy_visc = eddy_visc
         
         # Configurations
         self.n_total = x_features.shape[0] # total number of examples
