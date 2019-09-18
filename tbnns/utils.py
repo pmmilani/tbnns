@@ -130,8 +130,7 @@ def cleanDiffusivity(diff, g, test_inputs, n_std, prt_default, gamma_min, verbos
     num_ext = np.sum(mask_ext) # total number of entries affected by this step
     #--------------------------------------------------------------------       
     
-    # (2) Here, make sure that all real part of eigenvalues have a minimum value.
-    
+    # (2) Here, make sure that all real part of eigenvalues have a minimum value.    
     # First, clear all negative ones; then add a complement to all the positive
     # but very small ones        
     eig_all, _ = np.linalg.eig(diff)
@@ -153,7 +152,6 @@ def cleanDiffusivity(diff, g, test_inputs, n_std, prt_default, gamma_min, verbos
     
     
     # (3) Here, make sure that no diffusivities have negative diagonals.
-
     # First, clean negative values
     t = np.amin([diff[:,0,0],diff[:,1,1],diff[:,2,2]],axis=0) # minimum diagonal entry
     diff, g = applyMask(diff, g, t < 0, prt_default)        
@@ -181,11 +179,11 @@ def cleanDiffusivity(diff, g, test_inputs, n_std, prt_default, gamma_min, verbos
     toc = timeit.default_timer()
     print("Done! It took {:.1f}s".format(toc-tic), flush=True)
     if verbose:            
-        print("{:.3f}% of points were cleaned due to outlier inputs."\
+        print("{:.2f}% of points were cleaned due to outlier inputs."\
             .format(100.0*num_ext/diff.shape[0]), flush=True)
-        print("{:.3f}% of points were cleaned due to negative eigenvalues"\
+        print("{:.2f}% of points were cleaned due to negative eigenvalues"\
             .format(100.0*num_eig/diff.shape[0]), flush=True)
-        print("{:.3f}% of points were cleaned due to negative diagonal diffusivities:"\
+        print("{:.2f}% of points were cleaned due to negative diagonal diffusivities:"\
             .format(100.0*num_neg/diff.shape[0]), flush=True)
         print("In cleaned diffusivity: min eigenvalue real part = {:g}".format(min_eig)
               + ", minimum diagonal entry = {:g}".format(min_diag), flush=True)   
@@ -232,6 +230,7 @@ def suppressWarnings():
     """
     This function suppresses several warnings from Tensorflow.
     """
+    
     import tensorflow.python.util.deprecation as deprecation
     deprecation._PRINT_DEPRECATION_WARNINGS = False
     if type(tf.contrib) != type(tf): tf.contrib._warning = None

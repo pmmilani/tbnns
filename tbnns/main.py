@@ -13,8 +13,27 @@ import timeit
 from tbnns.data_batcher import Batch, BatchGenerator
 from tbnns import constants
 from tbnns import utils
+from pkg_resources import get_distribution
 
 utils.suppressWarnings()
+
+
+def printInfo():
+    """
+    Makes sure everything is properly installed.
+    
+    We print a welcome message, and the version of the package. Return 1 at the end
+    if no exceptions were raised.
+    """
+    
+    print('Welcome to TBNN-s - Tensor Basis Neural Network for Scalar Mixing package!')
+    
+    # Get distribution version
+    dist = get_distribution('tbnns')
+    print('Version: {}'.format(dist.version))    
+       
+    return 1 # return this if everything went ok
+    
 
 # Run this to suppress gnarly warnings/info messages from tensorflow
 class TBNNS(object):
@@ -104,7 +123,8 @@ class TBNNS(object):
         Creates the neural network section of the model, with fully connected layers            
 
         Defines:
-        self.g -- the coefficients for each of the form invariant basis, shape (None,num_basis)
+        self.g -- the coefficients for each of the form invariant basis, of
+                  shape (None,num_basis)
         """
         
         # Creates the first hidden state from the inputs
@@ -147,7 +167,8 @@ class TBNNS(object):
             gradc = tf.expand_dims(self.gradc, -1)
 
             # shape of [None, 3]
-            self.uc_predicted = -1.0*tf.expand_dims(self.eddy_visc,-1)*tf.squeeze(tf.matmul(self.diffusivity, gradc))
+            self.uc_predicted = -1.0 * ( tf.expand_dims(self.eddy_visc,-1) *
+                                         tf.squeeze(tf.matmul(self.diffusivity, gradc)) )
         
 
     def addLoss(self):
@@ -164,14 +185,17 @@ class TBNNS(object):
         with tf.variable_scope("loss"):
             
             # Average prediction loss across batch
-            loss_prediction = tf.norm(self.uc - self.uc_predicted, ord=2, axis=1)/tf.norm(self.uc, ord=2, axis=1)
+            loss_prediction = ( tf.norm(self.uc - self.uc_predicted, ord=2, axis=1) /
+                                tf.norm(self.uc, ord=2, axis=1) )
+            
             self.loss_pred = tf.reduce_mean(tf.log(loss_prediction))               
             
-            # Calculate the L2 regularization component of the loss. Don't regularize bias
+            # Calculate the L2 regularization component of the loss
             vars = tf.trainable_variables()
             self.loss_l2 = self.FLAGS['l2_reg'] *\
-                           tf.add_n([tf.nn.l2_loss(v) for v in vars if ('bias' not in v.name)])             
-
+                     tf.add_n([tf.nn.l2_loss(v) for v in vars if ('bias' not in v.name)])             
+            
+            # Loss is the sum of different components
             self.loss = self.loss_pred + self.loss_l2  
             
 
@@ -371,7 +395,8 @@ class TBNNS(object):
         batch = batch_gen.nextBatch()
         while batch is not None:
             n_batch = batch.x_features.shape[0] # number of points in this batch
-            total_diff[i:i+n_batch,:,:], total_g[i:i+n_batch] = self.getDiffusivity(session, batch)
+            total_diff[i:i+n_batch,:,:], total_g[i:i+n_batch] = self.getDiffusivity(session,
+                                                                                    batch)
             i += n_batch
             batch = batch_gen.nextBatch()
         
@@ -385,39 +410,93 @@ class TBNNS(object):
         
     
     def train(self, session, num_epochs, path_to_saver,
-              train_inputs, train_tensor_basis, train_uc, train_gradc, train_eddy_visc,
-              dev_inputs, dev_tensor_basis, dev_uc, dev_gradc, dev_eddy_visc,
-              update_stats=True, initialize=True, early_stop=10, subsample_devloss=None):
+              train_x_features, train_tensor_basis, train_uc, train_gradc, train_eddy_visc,
+              dev_x_features, dev_tensor_basis, dev_uc, dev_gradc, dev_eddy_visc,
+              update_stats=True, early_stop_dev=0, subsample_devloss=None):
         """
-        This method trains the model
+        This method trains the model.
+        
+        Inputs:
+        session -- current TensorFlow session
+        num_epochs -- int, contains max number of epochs to train the model for
+        path_to_saver -- string containing the location in disk where the model 
+                         parameters will be saved after it is trained. 
+        train_x_features -- numpy array containing the features in the training set,
+                            of shape (num_train, num_features)
+        train_tensor_basis -- numpy array containing the tensor basis in the training 
+                              set, of shape (num_train, num_basis, 3, 3)
+        train_uc -- numpy array containing the label (uc vector) in the training set, of
+                    shape (num_train, 3)
+        train_gradc -- numpy array containing the gradient of c vector in the training
+                       set, of shape (num_train, 3)
+        train_eddy_visc -- numpy array containing the eddy viscosity in the training set
+                           dataset, of shape (num_train)
+        dev_x_features -- numpy array containing the features in the dev set,
+                          of shape (num_dev, num_features)
+        dev_tensor_basis -- numpy array containing the tensor basis in the dev 
+                            set, of shape (num_dev, num_basis, 3, 3)
+        dev_uc -- numpy array containing the label (uc vector) in the dev set, of
+                  shape (num_dev, 3)
+        dev_gradc -- numpy array containing the gradient of c vector in the dev
+                     set, of shape (num_dev, 3)
+        dev_eddy_visc -- numpy array containing the eddy viscosity in the dev set
+                         dataset, of shape (num_dev)
+        update_stats -- bool, optional argument. Whether to normalize features and update
+                        the value of mean and std of features given this training set. By
+                        default is True.
+        early_stop_dev -- int, optional argument. How many iterations to wait for the dev
+                          loss to improve before breaking. If this is activated, then we
+                          save the model that generates the best prediction dev loss even
+                          if the loss went up later. If this is activated, training stops
+                          early if the dev loss is not going down anymore. Note that this
+                          quantities number of times we measure the dev loss, i.e.,
+                          early_stop_dev * FLAGS['eval_every'] iterations. If this is
+                          zero, then it is deactivated.
+        subsample_devloss -- optional argument, controls whether and how much to
+                             subsample the dev set to calculate losses. If the dev set
+                             is very big, calculating the full loss can be slow, so you
+                             can set this parameter to only use part of it. If this is
+                             less than 1, it indicates a ratio (0.1 means 10% of points
+                             at random are used); if this is more than 1, it indicates abs
+                             number (10000 means 10k points are used at random). None
+                             deactivates subsampling, which is default behavior.
+        
+        
+        Returns:
+        best_dev_loss -- The best (prediction) loss throughout training in the dev set
+        end_dev_loss -- The final (prediction) loss throughout training in the dev set
+        step_list -- A list containing iteration numbers at which losses are returned
+        train_loss_list -- A list containing training losses throughout training
+        dev_loss_list -- A list containing dev losses throughout training
         """
         
-        print("Training...", flush=True)
-        
+        print("Training...", flush=True)        
         self.saver_path = path_to_saver
-        
-        # If this is true, initialize all global variables
-        if initialize:
-            session.run(tf.global_variables_initializer())            
+        session.run(tf.global_variables_initializer()) # initializes parameters
         
         # Normalizes the inputs and save the mean and standard deviation
         if update_stats:
-            self.features_mean = np.mean(train_inputs, axis=0, keepdims=True)
-            self.features_std = np.std(train_inputs, axis=0, keepdims=True)
-            train_inputs = (train_inputs - self.features_mean)/self.features_std       
+            self.features_mean = np.mean(train_x_features, axis=0, keepdims=True)
+            self.features_std = np.std(train_x_features, axis=0, keepdims=True)
+            train_x_features = (train_x_features - self.features_mean)/self.features_std       
         
         # Keeps track of the best dev loss
-        best_dev_loss = 1e10
+        best_dev_loss=1e10
         cur_iter=0
         to_break=False
         exp_loss=None # exponentially-smoothed training loss
         
+        # Lists of losses to keep track and plot later
+        step_list = []
+        train_loss_list = []
+        dev_loss_list = []
+        
         # Initialize batch generator
         batch_gen = BatchGenerator(self.FLAGS['train_batch_size'],
-                                   train_inputs, train_tensor_basis, train_uc,
+                                   train_x_features, train_tensor_basis, train_uc,
                                    train_gradc, train_eddy_visc)
         
-        # This loop goes over the epochs
+        # This loop goes over the epochs        
         for ep in range(num_epochs):
             tic = timeit.default_timer()
         
@@ -434,23 +513,32 @@ class TBNNS(object):
                 
                 # Do this every self.FLAGS['eval_every'] steps
                 if step % self.FLAGS['eval_every'] == 0 and step != 0:
+                    # Evaluate dev loss
                     print("Step {}. Evaluating losses:".format(step), end="", flush=True)                    
-                    loss_dev, loss_dev_pred = self.getTotalLoss(session, dev_inputs, 
-                                              dev_tensor_basis, dev_uc, dev_gradc, 
-                                              dev_eddy_visc, subsample=subsample_devloss)                                              
-                    print(" Exp Train Loss: {:g} / Dev Loss: {:g}".format(exp_loss,loss_dev), flush=True)
+                    loss_dev, loss_dev_pred = self.getTotalLoss(session, dev_x_features, 
+                                                                dev_tensor_basis, dev_uc, 
+                                                                dev_gradc, dev_eddy_visc,
+                                                            downsample=subsample_devloss)                                              
+                    print(" Exp Train Loss: {:g} / Dev Loss: {:g}".format(exp_loss,
+                          loss_dev), flush=True)
+                    
+                    # Append to lists
+                    step_list.append(step)
+                    train_loss_list.append(exp_loss)
+                    dev_loss_list.append(loss_dev)                    
                     
                     # If the dev loss beats the previous best, run this
                     if loss_dev_pred < best_dev_loss:
-                        print("(*) New best prediction loss: {:g}".format(loss_dev_pred), flush=True)
+                        print("(*) New best prediction loss: {:g}".format(loss_dev_pred),
+                              flush=True)
                         best_dev_loss = loss_dev_pred
                         self.saver.save(session, self.saver_path)
-                        cur_iter=0
+                        cur_iter_dev = 0
                     else:
-                        cur_iter += 1 # holds number of checkpoints since dev loss last improved
+                        cur_iter_dev += 1 # number of checks since dev loss last improved
                     
-                    # Detects early stopping
-                    if cur_iter > early_stop:
+                    # Detects early stopping in the dev set
+                    if early_stop_dev > 0 and cur_iter_dev > early_stop_dev:
                         to_break = True
                         break                        
                 
@@ -460,51 +548,94 @@ class TBNNS(object):
             print("---------Epoch {} took {:.2f}s".format(ep,toc-tic), flush=True)
 
             if to_break:
-                print("(**) Dev loss not changing... Training will stop early.", flush=True)
+                print("(**) Dev loss not changing... Training will stop early.", 
+                      flush=True)
                 break                
         
+        # Calculate last dev loss 
+        _, end_dev_loss = self.getTotalLoss(session, dev_x_features, 
+                                            dev_tensor_basis, dev_uc, dev_gradc,
+                                            dev_eddy_visc, downsample=subsample_devloss)       
+        if early_stop_dev == 0: # save the last model if early stopping is deactivated           
+            print("Saving model with dev prediction loss {:g}... ".format(end_dev_loss), 
+                  end="", flush=True)
+            self.saver.save(session, self.saver_path)
+        
         print("Done!", flush=True)
-        return best_dev_loss
+        
+        return best_dev_loss, end_dev_loss, step_list, train_loss_list, dev_loss_list
     
     
-    def loadParameters(self, session):
+    def loadParameters(self, session, saver_path=None):
         """
         Invoke the saver to restore a previous set of parameters
+        
+        Arguments:
+        session -- current TensorFlow session
+        saver_path -- optional argument, path where file is located. If None (default),
+                      use the current value of self.saver_path
         """
+        
+        if saver_path is not None:
+            self.saver_path = saver_path
+        
         self.saver.restore(session, self.saver_path)
         
     
-    def saveToDisk(self, path):
+    def saveToDisk(self, description, path, compress=True, protocol=-1):
         """
-        Save configurations to disk (parameters are saved by the train() method)
+        Save model meta-data to disk, which is used to restore it later.
+        Note that trainable parameters are directly saved by the train() function.
+        
+        Arguments:
+        description -- string, containing he description of the model being saved
+        path -- string containing the path on disk in which the model is saved
+        compress -- optional, boolean that is passed to joblib determining whether to
+                    compress the data saved to disk.
+        protocol -- optional, int containing protocol passed to joblib for saving data
+                    to disk.        
         """
     
         print("Saving to disk...", end="", flush=True)
         
-        list_variables = [self.FLAGS, self.saver_path, self.features_mean, self.features_std]
-        joblib.dump(list_variables, path, protocol=2)
+        list_variables = [self.FLAGS, self.saver_path, 
+                          self.features_mean, self.features_std]
+        joblib.dump([description, list_variables], path, 
+                    compress=compress, protocol=protocol)
         
         print(" Done.", flush=True)        
         
     
     def getRANSLoss(self, uc, gradc, eddy_visc, prt=None):
         """
-        Call this function to get a baseline loss (using fixed Pr_t)
-        for a given dataset
+        This function provides a baseline loss from a fixed turbulent Pr_t assumption.
+        
+        Arguments:
+        uc -- numpy array, shape (n_points, 3) containing the true u'c' vector
+        gradc -- numpy array, shape (n_points, 3) containing the gradient of scalar
+                 concentration
+        eddy_visc -- numpy array, shape (n_points,) containing the eddy viscosity
+                     (with units of m^2/s) from RANS calculation
+        prt -- optional, number containing the fixed turbulent Prandtl number to use.
+               If None, use the value specified in contants.py
+               
+        Returns:
+        loss - the mean value of the loss from using the fixed Pr_t assumption
         """
         
         if prt is None:
             prt = constants.PR_T
         
         uc_rans = -1.0 * (np.expand_dims(eddy_visc/prt, 1)) * gradc
-        loss = np.mean(np.log(np.linalg.norm(uc_rans - uc, ord=2, axis=1)/np.linalg.norm(uc, ord=2, axis=1)))
+        loss = np.mean( ( np.log(np.linalg.norm(uc_rans - uc, ord=2, axis=1)/
+                         np.linalg.norm(uc, ord=2, axis=1)) ) )
         
         return loss    
     
     
     def printTrainableParams(self):
         """
-        Call this function to print all trainable parameters of the model
+        Call this function to print all trainable parameters of the model.
         """
         
         # Prints all trainable parameters for sanity check
@@ -512,6 +643,4 @@ class TBNNS(object):
         print("This model has {} trainable parameters. They are:".format(len(params)))
         for i, v in enumerate(params):
             print("{}: {}".format(i, v.name))
-            print("\t shape: {} size: {}".format(v.shape, np.prod(v.shape))) 
-        
-        
+            print("\t shape: {} size: {}".format(v.shape, np.prod(v.shape)))       
