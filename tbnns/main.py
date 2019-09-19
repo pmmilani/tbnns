@@ -15,8 +15,8 @@ from tbnns import constants
 from tbnns import utils
 from pkg_resources import get_distribution
 
+# Run this to suppress gnarly warnings/info messages from tensorflow
 utils.suppressWarnings()
-
 
 def printInfo():
     """
@@ -35,41 +35,33 @@ def printInfo():
     return 1 # return this if everything went ok
     
 
-# Run this to suppress gnarly warnings/info messages from tensorflow
 class TBNNS(object):
     """
     This class contains definitions and methods needed for the TBNN-s class.
     """
     
-    def __init__(self, FLAGS, saver_path=None, features_mean=None, features_std=None):
+    def __init__(self):
         """
-        Constructor class that initializes the model.
+        Constructor class that initializes the model. Sets instance variables to None.        
+        """        
+        
+        self._tfsession = None
+        self.FLAGS = None      
+        self.features_mean = None
+        self.features_std = None
+        self.saver_path = None      
+        
+    
+    def initializeGraph(self, FLAGS, features_mean=None, features_std=None):
+        """
+        This method builds the tensorflow graph of the network.
         
         Arguments:
-        FLAGS -- dictionary containing different parameters for the network
-        saver_path -- string, containing the (relative) path in which the model
-                      parameters should be saved.
+        FLAGS -- dictionary containing different parameters for the network        
         features_mean -- mean of the training features, which is used to normalize the
                          features at training time.
         features_std -- standard deviation of the training features, which is used to 
                         normalize the features at training time.
-        """
-        
-        print("Initializing TBNN-s Class...", end="", flush=True)
-                   
-        self.FLAGS = FLAGS        
-        self.features_mean = features_mean
-        self.features_std = features_std
-        self.saver_path = saver_path
-        
-        self.buildGraph()   
-                    
-        print(" Done!", flush=True)
-        
-    
-    def buildGraph(self):
-        """
-        This method builds the tensorflow graph of the network.
         
         Defines:
         self.global_step -- integer with the number of the current training step
@@ -77,7 +69,12 @@ class TBNNS(object):
         self.saver -- tf.train.Saver class responsible for saving the parameter values 
                       to disk
         """   
-      
+        
+        # Initializes appropriate instance variables
+        self.FLAGS = FLAGS        
+        self.features_mean = features_mean
+        self.features_std = features_std
+                
         # Add all parts of the graph
         tf.reset_default_graph()
         with tf.variable_scope("Model"):
@@ -93,7 +90,11 @@ class TBNNS(object):
         self.updates = opt.minimize(self.loss, global_step=self.global_step)
         
         # Define savers (for checkpointing)
-        self.saver = tf.train.Saver(tf.global_variables(), max_to_keep=1)
+        self.saver = tf.train.Saver(tf.global_variables(), max_to_keep=1)        
+        
+        # Creates session and initializes global variables
+        self._tfsession = tf.Session()
+        self._tfsession.run(tf.global_variables_initializer())
         
     
     def addPlaceholders(self):
@@ -199,13 +200,12 @@ class TBNNS(object):
             self.loss = self.loss_pred + self.loss_l2  
             
 
-    def runTrainIter(self, session, batch):
+    def runTrainIter(self, batch):
         """
         This performs a single training iteration (forward pass, loss computation, backprop, 
         parameter update)
 
-        Inputs:
-        session -- current TensorFlow session
+        Inputs:        
         batch -- a Batch object containing information necessary for training         
 
         Returns:
@@ -225,17 +225,16 @@ class TBNNS(object):
         output_feed = [self.updates, self.loss, self.global_step]
 
         # Run the model
-        [_, loss, global_step] = session.run(output_feed, input_feed)
+        [_, loss, global_step] = self._tfsession.run(output_feed, input_feed)
 
         return loss, global_step
         
     
-    def getLoss(self, session, batch):
+    def getLoss(self, batch):
         """
         This runs a single forward pass and obtains the loss.
         
-        Inputs:
-        session -- current TensorFlow session
+        Inputs:        
         batch -- a Batch object containing information necessary for training         
 
         Returns:
@@ -254,17 +253,16 @@ class TBNNS(object):
         output_feed = [self.loss, self.loss_pred]
         
         # Run the model
-        [loss, loss_pred] = session.run(output_feed, input_feed)
+        [loss, loss_pred] = self._tfsession.run(output_feed, input_feed)
 
         return loss, loss_pred
         
         
-    def getDiffusivity(self, session, batch):
+    def getDiffusivity(self, batch):
         """
         This runs a single forward pass to obtain the (dimensionless) diffusivity matrix.
         
-        Inputs:
-        session -- current TensorFlow session
+        Inputs:        
         batch -- a Batch object containing information necessary for testing         
 
         Returns:
@@ -281,18 +279,17 @@ class TBNNS(object):
         output_feed = [self.diffusivity, self.g]
         
         # Run the model
-        [diff, g] = session.run(output_feed, input_feed)
+        [diff, g] = self._tfsession.run(output_feed, input_feed)
         
         return diff, g
     
     
-    def getTotalLoss(self, session, x_features, tensor_basis, uc, gradc,
+    def getTotalLoss(self, x_features, tensor_basis, uc, gradc,
                      eddy_visc, normalize=True, downsample=None):
         """
         This method takes in a whole dataset and computes the average loss on it.
         
-        Inputs:
-        session -- current TensorFlow session
+        Inputs:        
         x_features -- numpy array containing the features in the whole dataset, of shape 
                       (num_points, num_features)
         tensor_basis -- numpy array containing the tensor basis in the whole dataset, of
@@ -331,7 +328,7 @@ class TBNNS(object):
         # Iterate through all batches of data
         batch = batch_gen.nextBatch()        
         while batch is not None:
-            this_loss, this_loss_pred = self.getLoss(session, batch)
+            this_loss, this_loss_pred = self.getLoss(batch)
             total_loss += this_loss * batch.x_features.shape[0]
             total_loss_pred += this_loss_pred * batch.x_features.shape[0]  
             batch = batch_gen.nextBatch()
@@ -343,14 +340,13 @@ class TBNNS(object):
         return total_loss, total_loss_pred
      
      
-    def getTotalDiffusivity(self, session, test_x_features, test_tensor_basis, 
+    def getTotalDiffusivity(self, test_x_features, test_tensor_basis, 
                             normalize=True, clean=True, n_std=None, prt_default=None, 
                             gamma_min=None):
         """
         This method takes in a whole test set and computes the diffusivity matrix on it.
         
-        Inputs:
-        session -- current TensorFlow session
+        Inputs:        
         test_x_features -- numpy array containing the features in the whole dataset, of
                            shape (num_points, num_features)
         test_tensor_basis -- numpy array containing the tensor basis in the whole
@@ -395,8 +391,7 @@ class TBNNS(object):
         batch = batch_gen.nextBatch()
         while batch is not None:
             n_batch = batch.x_features.shape[0] # number of points in this batch
-            total_diff[i:i+n_batch,:,:], total_g[i:i+n_batch] = self.getDiffusivity(session,
-                                                                                    batch)
+            total_diff[i:i+n_batch,:,:], total_g[i:i+n_batch] = self.getDiffusivity(batch)
             i += n_batch
             batch = batch_gen.nextBatch()
         
@@ -409,15 +404,14 @@ class TBNNS(object):
         return total_diff, total_g   
         
     
-    def train(self, session, num_epochs, path_to_saver,
+    def train(self, num_epochs, path_to_saver,
               train_x_features, train_tensor_basis, train_uc, train_gradc, train_eddy_visc,
               dev_x_features, dev_tensor_basis, dev_uc, dev_gradc, dev_eddy_visc,
               update_stats=True, early_stop_dev=0, subsample_devloss=None):
         """
         This method trains the model.
         
-        Inputs:
-        session -- current TensorFlow session
+        Inputs:        
         num_epochs -- int, contains max number of epochs to train the model for
         path_to_saver -- string containing the location in disk where the model 
                          parameters will be saved after it is trained. 
@@ -472,8 +466,7 @@ class TBNNS(object):
         
         print("Training...", flush=True)        
         self.saver_path = path_to_saver
-        session.run(tf.global_variables_initializer()) # initializes parameters
-        
+                
         # Normalizes the inputs and save the mean and standard deviation
         if update_stats:
             self.features_mean = np.mean(train_x_features, axis=0, keepdims=True)
@@ -505,7 +498,7 @@ class TBNNS(object):
             # Iterates through batches of data
             batch = batch_gen.nextBatch()        
             while batch is not None:
-                loss, step = self.runTrainIter(session, batch) # take one training step
+                loss, step = self.runTrainIter(batch) # take one training step
                 
                 # Updates exponentially-smoothed training loss
                 if exp_loss is None: exp_loss=loss
@@ -515,7 +508,7 @@ class TBNNS(object):
                 if step % self.FLAGS['eval_every'] == 0 and step != 0:
                     # Evaluate dev loss
                     print("Step {}. Evaluating losses:".format(step), end="", flush=True)                    
-                    loss_dev, loss_dev_pred = self.getTotalLoss(session, dev_x_features, 
+                    loss_dev, loss_dev_pred = self.getTotalLoss(dev_x_features, 
                                                                 dev_tensor_basis, dev_uc, 
                                                                 dev_gradc, dev_eddy_visc,
                                                             downsample=subsample_devloss)                                              
@@ -532,7 +525,7 @@ class TBNNS(object):
                         print("(*) New best prediction loss: {:g}".format(loss_dev_pred),
                               flush=True)
                         best_dev_loss = loss_dev_pred
-                        self.saver.save(session, self.saver_path)
+                        self.saver.save(self._tfsession, self.saver_path)
                         cur_iter_dev = 0
                     else:
                         cur_iter_dev += 1 # number of checks since dev loss last improved
@@ -553,34 +546,20 @@ class TBNNS(object):
                 break                
         
         # Calculate last dev loss 
-        _, end_dev_loss = self.getTotalLoss(session, dev_x_features, 
-                                            dev_tensor_basis, dev_uc, dev_gradc,
-                                            dev_eddy_visc, downsample=subsample_devloss)       
-        if early_stop_dev == 0: # save the last model if early stopping is deactivated           
+        _, end_dev_loss = self.getTotalLoss(dev_x_features, dev_tensor_basis, 
+                                            dev_uc, dev_gradc, dev_eddy_visc,
+                                            downsample=subsample_devloss)
+        
+        # save the last model if early stopping is deactivated
+        if early_stop_dev == 0:            
             print("Saving model with dev prediction loss {:g}... ".format(end_dev_loss), 
                   end="", flush=True)
-            self.saver.save(session, self.saver_path)
+            self.saver.save(self._tfsession, self.saver_path)
         
         print("Done!", flush=True)
         
         return best_dev_loss, end_dev_loss, step_list, train_loss_list, dev_loss_list
     
-    
-    def loadParameters(self, session, saver_path=None):
-        """
-        Invoke the saver to restore a previous set of parameters
-        
-        Arguments:
-        session -- current TensorFlow session
-        saver_path -- optional argument, path where file is located. If None (default),
-                      use the current value of self.saver_path
-        """
-        
-        if saver_path is not None:
-            self.saver_path = saver_path
-        
-        self.saver.restore(session, self.saver_path)
-        
     
     def saveToDisk(self, description, path, compress=True, protocol=-1):
         """
@@ -603,7 +582,31 @@ class TBNNS(object):
         joblib.dump([description, list_variables], path, 
                     compress=compress, protocol=protocol)
         
-        print(" Done.", flush=True)        
+        print(" Done.", flush=True)    
+        
+    
+    def loadfromDisk(self, path_class, verbose=False):
+        """
+        Invoke the saver to restore a previous set of parameters
+        
+        Arguments:        
+        path_class -- string containing path where file is located.
+        verbose -- boolean flag, whether to print more details about the model.
+                   By default it is False.
+        """
+        
+        # Loading file with metadata from disk
+        description, list_vars = joblib.load(path_class)
+        
+        FLAGS, saved_path, feat_mean, feat_std = list_vars # unpack list_vars
+        self.initializeGraph(FLAGS, feat_mean, feat_std) # initialize      
+        self.saver.restore(self._tfsession, saved_path) # restore previous parameters
+        
+        if verbose:
+            print("Model loaded successfully! Description: {}".format(description))
+            self.printTrainableParams()
+        
+        return description       
         
     
     def getRANSLoss(self, uc, gradc, eddy_visc, prt=None):
