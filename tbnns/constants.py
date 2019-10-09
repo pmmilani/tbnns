@@ -27,3 +27,15 @@ N_STD = 20
 # produced. Higher values are more stable, but more intrusive. Must be
 # greater than zero.
 GAMMA_MIN = 0.01
+
+# Default loss type
+LOSS_TYPE = 'log'
+
+# Default L2 regularization strength
+L2_REG = 1e-3
+
+# Default negative diffusivity loss strength
+NEG_FACTOR = 0
+
+# Default flag for the combined model
+COMBINED_NET = False

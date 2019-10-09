@@ -1,3 +1,3 @@
 #-------------------------- init.py file for TBNN-s package ----------------------------#
 
-name = "tbnns"
+__name__ = "tbnns"

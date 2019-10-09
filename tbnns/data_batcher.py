@@ -1,7 +1,9 @@
 #------------------------------ data_batcher.py file -----------------------------------#
 """
-This file contains classes that help in training/testing neural networks. They consist of
-classes that generate mini-batches of data.
+This file contains classes that help in training/testing neural networks. It defines two
+classes: BatchGenerator and Batch. The latter contains a mini-batch of data that is
+presented to the neural network for training, while the former takes in the whole dataset
+and returns instances of Batch.
 """
 
 # ------------ Import statements
@@ -11,20 +13,25 @@ import numpy as np
 class Batch(object):
     """
     This class consolidates all information needed in a single batch
-    to train/test a TBNN.
+    to train/test a TBNN-s.
     """
     
     def __init__(self, x_features, tensor_basis,  
-                 uc=None, gradc=None, eddy_visc=None):
+                 uc=None, gradc=None, eddy_visc=None,
+                 loss_weight=None, log_gamma=None):
         """
         Constructor method, which takes in all the arrays and stores them.
         
         Arguments:
         x_features -- numpy array of shape (batch_size, n_features).
-        tensor_basis -- numpy array of shape (batch_size, n_basis, 3, 3).
+        tensor_basis -- numpy array of shape (batch_size, n_basis, 3, 3)
         uc -- numpy array of shape (batch_size, 3). Optional, only at training time.
         gradc -- numpy array of shape (batch_size, 3). Optional, only at training time.
         eddy_visc -- numpy array of shape (batch_size,). Optional, only at training time.
+        loss_weight -- numpy array of shape (batch_size,1). Optional, only at training 
+                       time and only for specific prediction losses.
+        log_gamma -- numpy array of shape (batch_size,). Optional, only at training time
+                     and only for the improved model.
         """
         
         # Features and basis are always required
@@ -36,6 +43,8 @@ class Batch(object):
         # Extra information needed at training time is stored here
         self.gradc = gradc        
         self.eddy_visc = eddy_visc
+        self.loss_weight = loss_weight
+        self.log_gamma = log_gamma
         
 
 class BatchGenerator(object):
@@ -45,7 +54,8 @@ class BatchGenerator(object):
     """
     
     def __init__(self, batch_size, x_features, tensor_basis, 
-                 uc=None, gradc=None, eddy_visc=None):
+                 uc=None, gradc=None, eddy_visc=None,
+                 loss_weight=None, log_gamma=None):
         """
         Constructor method, which takes in batch size and full arrays.
         
@@ -56,6 +66,12 @@ class BatchGenerator(object):
         uc -- numpy array of shape (n_total, 3). Optional, only at training time.
         gradc -- numpy array of shape (num_total, 3). Optional, only at training time.
         eddy_visc -- numpy array of shape (num_total,). Optional, only at training time.
+        loss_weight -- numpy array of shape (num_total, ) or (num_total, 1). Optional,
+                       only needed at training time and for specific loss types. Note
+                       that this function will expand_dims if needed to make it 
+                       (num_total,1)
+        log_gamma -- numpy array of shape (num_total,). Optional, only needed at training
+                     time for the combined model.
         """
         
         # Data that will be used in the batches
@@ -64,14 +80,26 @@ class BatchGenerator(object):
         self.uc = uc
         self.gradc = gradc
         self.eddy_visc = eddy_visc
+        self.log_gamma = log_gamma
+        
+        # Expand dims if necessary
+        if loss_weight is not None:
+            if len(loss_weight.shape) == 1:
+                self.loss_weight = np.expand_dims(loss_weight,-1)
+            else:
+                self.loss_weight = loss_weight
+        else:
+            self.loss_weight = None
+            
         
         # Configurations
         self.n_total = x_features.shape[0] # total number of examples
         self.batch_size = batch_size
         self.batch_num = 0 # this contains the current batch number
                 
-        # Contains all the indices that must be used, in a fixed order
-        self.idx_tot = np.arange(self.n_total)       
+        # Contains all the indices that must be used, in increasing order originally
+        self.idx_tot = np.arange(self.n_total)
+        
         
     def reset(self):
         """
@@ -100,7 +128,8 @@ class BatchGenerator(object):
 
         # all other batches: returns the next num_batch elements
         else:
-            idx = self.idx_tot[self.batch_num*self.batch_size:(self.batch_num+1)*self.batch_size]
+            idx = self.idx_tot[self.batch_num*self.batch_size:\
+                              (self.batch_num+1)*self.batch_size]
         
         # count extra batch
         self.batch_num += 1
@@ -108,13 +137,17 @@ class BatchGenerator(object):
         # return according to appropriate indices
         x = self.x_features[idx,:]
         tb = self.tensor_basis[idx,:,:,:]        
-        uc = None; gradc = None; eddy_visc = None
+        uc = None; gradc = None; eddy_visc = None; loss_weight = None; log_gamma = None
         if self.uc is not None:
             uc = self.uc[idx,:]
         if self.gradc is not None:
             gradc = self.gradc[idx,:]
         if self.eddy_visc is not None:
-            eddy_visc = self.eddy_visc[idx]        
+            eddy_visc = self.eddy_visc[idx]
+        if self.loss_weight is not None:
+            loss_weight = self.loss_weight[idx]
+        if self.log_gamma is not None:
+            log_gamma = self.log_gamma[idx]
         
         # Instantiate and return a Batch
-        return Batch(x, tb, uc, gradc, eddy_visc)        
+        return Batch(x, tb, uc, gradc, eddy_visc, loss_weight, log_gamma)
