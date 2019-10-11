@@ -205,19 +205,28 @@ class TBNNS(object):
             mult_bas = tf.multiply(tf.reshape(self.g,shape=[-1,constants.NUM_BASIS,1,1]), 
                                    self.tensor_basis) 
             
-            # construct diffusivity, shape of [None,3,3]
-            if self.FLAGS['combined_net']:
-                self.gamma = tf.reshape(tf.exp(self.log_gamma_predicted), [-1, 1, 1])
-            else:
-                self.gamma = tf.constant(1.0)
-            self.diffusivity = tf.reduce_sum(mult_bas, axis=1) * self.gamma
+            # just direction of the diffusivity matrix 
+            self.diff_direction = tf.reduce_sum(mult_bas, axis=1)         
             
             # shape of [None,3,1]
-            gradc = tf.expand_dims(self.gradc, -1)
+            gradc_ext = tf.expand_dims(self.gradc, -1)
+            
+            # shape of [None, 3], u'c' vector with only direction information
+            self.uc_direction = -1.0*tf.squeeze(tf.matmul(self.diff_direction, gradc_ext))
+            
+            # construct self.diffusivity, tensor of shape [None,3,3]
+            if self.FLAGS['combined_net']:                
+                gamma_now = ( tf.reduce_sum(tf.squeeze(tf.matmul(self.diff_direction, gradc_ext))*self.gradc, axis=1) / tf.reduce_sum(self.gradc*self.gradc, axis=1) )                             
+                self.gamma = tf.exp(self.log_gamma_predicted)                
+                self.diffusivity = self.diff_direction*tf.reshape(self.gamma/gamma_now, [-1,1,1])
+                #self.diffusivity = self.diff_direction                
+            else:
+                self.diffusivity = self.diff_direction
+                self.gamma = tf.constant(1.0)
 
-            # shape of [None, 3]
+            # shape of [None, 3], full u'c' vector
             self.uc_predicted = -1.0 * ( tf.expand_dims(self.eddy_visc,-1) *
-                                         tf.squeeze(tf.matmul(self.diffusivity, gradc)) )
+                                         tf.squeeze(tf.matmul(self.diffusivity, gradc_ext)) )
         
 
     def addLoss(self):
@@ -235,45 +244,51 @@ class TBNNS(object):
         
         with tf.variable_scope("losses"):
             
-            # Average prediction loss across batch
+            # Calculate prediction loss
             if self.FLAGS['loss_type'] == 'log':
                 self.loss_pred = layers.lossLog(self.uc, self.uc_predicted, tf_flag=True)
-            elif self.FLAGS['loss_type'] == 'l2_k':
+            if self.FLAGS['loss_type'] == 'l2_k':
                 self.loss_pred = layers.lossL2k(self.uc, self.uc_predicted, 
                                                 self.loss_weight, tf_flag=True)
-            elif self.FLAGS['loss_type'] == 'l2':
+            if self.FLAGS['loss_type'] == 'l2':
                 self.loss_pred = layers.lossL2(self.uc, self.uc_predicted,
-                                               self.loss_weight, tf_flag=True)            
+                                               self.loss_weight, tf_flag=True)
+            if self.FLAGS['loss_type'] == 'cos':
+                self.loss_pred = layers.lossCos(self.uc, self.uc_direction, tf_flag=True)
             
             # Calculate the L2 regularization component of the loss            
-            if self.FLAGS['l2_reg'] == 0:
-                self.loss_reg = tf.constant(0.0)
+            if self.FLAGS['l2_reg'] == 0: self.loss_reg = tf.constant(0.0)
             else:
                 vars = tf.trainable_variables()
-                self.loss_reg = self.FLAGS['l2_reg'] *\
+                self.loss_reg = \
                      tf.add_n([tf.nn.l2_loss(v) for v in vars if ('bias' not in v.name)]) 
             
             # negative diffusivity loss            
-            if self.FLAGS['neg_factor'] == 0:
-                self.loss_neg = tf.constant(0.0)
+            if self.FLAGS['neg_factor'] == 0: self.loss_neg = tf.constant(0.0)
             else:
-                diff_sym = 0.5*(self.diffusivity + 
-                                tf.linalg.matrix_transpose(self.diffusivity))
+                diff_sym = 0.5*(self.diff_direction + 
+                                tf.linalg.matrix_transpose(self.diff_direction))
                 # e contains eigenvalues of symmetric part, in non-decreasing order
                 e, _ = tf.linalg.eigh(diff_sym) 
-                self.loss_neg = self.FLAGS['neg_factor']*\
-                                tf.reduce_mean(tf.maximum(-tf.reduce_min(e,axis=1),0))
+                self.loss_neg = tf.reduce_mean(tf.maximum(-tf.reduce_min(e,axis=1),0))
             
-            # loss due to mismatch of gamma, only if combined_net mode is activated
+            # loss due to mismatch of gamma
             if self.FLAGS['combined_net']:
-                self.loss_gamma = self.FLAGS['gamma_factor']*\
-                             tf.reduce_mean((self.log_gamma_predicted-self.log_gamma)**2)            
+                self.loss_gamma = tf.reduce_mean((self.log_gamma_predicted-self.log_gamma)**2)                
+            elif self.FLAGS['gamma_loss']:                
+                log_gamma_implied = utils.calculateLogGamma(self.uc_predicted,
+                                                            self.gradc, self.eddy_visc,
+                                                            tf_flag=True)
+                self.loss_gamma = \
+                             tf.reduce_mean((log_gamma_implied-self.log_gamma)**2)           
             else:
                 self.loss_gamma = tf.constant(0.0)
-                
             
             # Loss is the sum of different components
-            self.loss = self.loss_pred + self.loss_reg + self.loss_neg + self.loss_gamma  
+            self.loss = (self.loss_pred 
+                         + self.FLAGS['l2_reg']*self.loss_reg 
+                         + self.FLAGS['neg_factor']*self.loss_neg
+                         + self.FLAGS['gamma_factor']*self.loss_gamma)  
             
 
     def runTrainIter(self, batch):
@@ -369,6 +384,7 @@ class TBNNS(object):
         input_feed = {}
         input_feed[self.x_features] = batch.x_features        
         input_feed[self.tensor_basis] = batch.tensor_basis
+        input_feed[self.gradc] = batch.gradc
                         
         # output_feed contains the things we want to fetch.
         output_feed = [self.diffusivity, self.g, self.gamma]
@@ -380,8 +396,8 @@ class TBNNS(object):
     
     
     def getTotalLosses(self, x_features, tensor_basis, uc, gradc, eddy_visc,
-                       loss_weight=None, log_gamma=None,
-                       normalize=True, downsample=None, report_psd=False):
+                       loss_weight=None, normalize=True, downsample=None, 
+                       report_psd=False):
         """
         This method takes in a whole dataset and computes the average loss on it.
         
@@ -397,9 +413,7 @@ class TBNNS(object):
         eddy_visc -- numpy array containing the eddy viscosity in the whole dataset, of
                         shape (num_points).
         loss_weight -- numpy array of shape (num_points). Optional, only needed for
-                       specific loss types.
-        log_gamma -- numpy array of shape (num_points). Optional, only needed for the 
-                     combined model.
+                       specific loss types.        
         normalize -- optional argument, boolean flag saying whether to normalize the 
                      features before feeding them to the neural network. True by default.
         downsample -- optional argument, ratio of points to use of the overall dataset.
@@ -421,7 +435,10 @@ class TBNNS(object):
         """
         
         # Make sure it is only None if appropriate flags are set
-        self.assertArguments(loss_weight, log_gamma)        
+        self.assertArguments(loss_weight)
+
+        # Calculates log(gamma) based on quantities received
+        log_gamma = utils.calculateLogGamma(uc, gradc, eddy_visc)        
         
         # Initializes quantities we need to keep track of
         total_loss = 0
@@ -438,12 +455,10 @@ class TBNNS(object):
         # Initialize batch generator, downsampling only if not None        
         idx = utils.downsampleIdx(num_points, downsample)
         if loss_weight is not None: loss_weight_d = loss_weight[idx]
-        else: loss_weight_d = None
-        if log_gamma is not None: log_gamma_d = log_gamma[idx]
-        else: log_gamma_d = None
+        else: loss_weight_d = None        
         batch_gen = BatchGenerator(constants.TEST_BATCH_SIZE, x_features[idx,:], 
                                    tensor_basis[idx,:,:,:], uc[idx,:], gradc[idx,:],
-                                   eddy_visc[idx], loss_weight_d, log_gamma_d)             
+                                   eddy_visc[idx], loss_weight_d, log_gamma[idx])             
         
         # Iterate through all batches of data
         batch = batch_gen.nextBatch()        
@@ -461,11 +476,11 @@ class TBNNS(object):
         total_loss_pred = total_loss_pred/num_points
         total_loss_reg = total_loss_reg/num_points
         total_loss_neg = total_loss_neg/num_points
-        total_loss_gamma = total_loss_gamma/num_points
+        total_loss_gamma = total_loss_gamma/num_points        
         
         # Report the number of non-PSD matrices
         if report_psd:
-            diff, _, _ = self.getTotalDiffusivity(x_features, tensor_basis, 
+            diff, _, _ = self.getTotalDiffusivity(x_features, tensor_basis, gradc, 
                                                   normalize=False, clean=False)
             diff_sym = 0.5*(diff+np.transpose(diff,axes=(0,2,1)))
             eig_all, _ = np.linalg.eigh(diff_sym)
@@ -478,7 +493,7 @@ class TBNNS(object):
                 total_loss_gamma, 0)
      
      
-    def getTotalDiffusivity(self, test_x_features, test_tensor_basis, 
+    def getTotalDiffusivity(self, test_x_features, test_tensor_basis, test_gradc, 
                             normalize=True, clean=True, n_std=None, prt_default=None, 
                             gamma_min=None):
         """
@@ -527,7 +542,7 @@ class TBNNS(object):
                     
         # Initialize batch generator. We do not call reset() to avoid shuffling the batch
         batch_gen = BatchGenerator(constants.TEST_BATCH_SIZE, test_x_features, 
-                                   test_tensor_basis)                      
+                                   test_tensor_basis, gradc=test_gradc)                      
         
         # Iterate through all batches of data
         batch = batch_gen.nextBatch()
@@ -552,8 +567,7 @@ class TBNNS(object):
     def train(self, num_epochs, path_to_saver,
             train_x_features, train_tensor_basis, train_uc, train_gradc, train_eddy_visc,
             dev_x_features, dev_tensor_basis, dev_uc, dev_gradc, dev_eddy_visc, 
-            train_loss_weight=None, dev_loss_weight=None, 
-            train_log_gamma=None, dev_log_gamma=None,
+            train_loss_weight=None, dev_loss_weight=None,           
             update_stats=True, early_stop_dev=0, downsample_devloss=None, 
             detailed_losses=False):
         """
@@ -588,13 +602,7 @@ class TBNNS(object):
                              prediction losses. Shape (num_train)
         dev_loss_weight -- optional argument, numpy array containing the loss_weight
                            for the dev data, which is used in some types of 
-                           prediction losses. Shape (num_dev)
-        train_log_gamma -- optional argument, numpy array containing the log_gamma values
-                           for the training set. This is only needed if combined_net is 
-                           True. Shape (num_train)        
-        dev_log_gamma -- optional argument, numpy array containing the log_gamma values
-                         for the dev set. This is only needed if combined_net is 
-                         True. Shape (num_dev)
+                           prediction losses. Shape (num_dev)        
         update_stats -- bool, optional argument. Whether to normalize features and update
                         the value of mean and std of features given this training set. By
                         default is True.
@@ -625,8 +633,12 @@ class TBNNS(object):
         """
         
         # Make sure it is only None if appropriate flags are set
-        self.assertArguments(train_loss_weight, train_log_gamma)
-        self.assertArguments(dev_loss_weight, dev_log_gamma)
+        self.assertArguments(train_loss_weight)
+        self.assertArguments(dev_loss_weight)
+        
+        # Calculates log(gamma) based on quantities received
+        train_log_gamma = utils.calculateLogGamma(train_uc, train_gradc, train_eddy_visc)
+        dev_log_gamma = utils.calculateLogGamma(dev_uc, dev_gradc, dev_eddy_visc)
         
         print("Training...", flush=True)        
         self.saver_path = path_to_saver
@@ -677,7 +689,7 @@ class TBNNS(object):
                     if detailed_losses:
                         losses = self.getTotalLosses(dev_x_features, dev_tensor_basis,
                                                      dev_uc, dev_gradc, dev_eddy_visc,
-                                                     dev_loss_weight, dev_log_gamma,
+                                                     dev_loss_weight,
                                                      downsample=downsample_devloss,
                                                      report_psd=True)          
                         (loss_dev, loss_dev_pred, loss_dev_reg, loss_dev_neg,
@@ -693,7 +705,7 @@ class TBNNS(object):
                     else:
                         losses = self.getTotalLosses(dev_x_features, dev_tensor_basis,
                                                      dev_uc, dev_gradc, dev_eddy_visc,
-                                                     dev_loss_weight, dev_log_gamma,
+                                                     dev_loss_weight,
                                                      downsample=downsample_devloss,
                                                      report_psd=False)          
                         (loss_dev, loss_dev_pred, _, loss_dev_neg, 
@@ -735,8 +747,7 @@ class TBNNS(object):
         _, end_dev_loss, _, _, _, _ = self.getTotalLosses(dev_x_features, 
                                                           dev_tensor_basis, 
                                                           dev_uc, dev_gradc,
-                                                          dev_eddy_visc, dev_loss_weight,
-                                                          dev_log_gamma,
+                                                          dev_eddy_visc, dev_loss_weight,                                                          
                                                           downsample=downsample_devloss)
         
         # save the last model if early stopping is deactivated
@@ -797,13 +808,15 @@ class TBNNS(object):
         
         if verbose:
             print("Model loaded successfully! Description: {}".format(description))
+            print("FLAGS employed:")
+            for key in self.FLAGS:
+                print(" {} --- {}".format(key, self.FLAGS[key]))
             self.printTrainableParams()
         
         return description       
         
     
-    def getRansLoss(self, uc, gradc, eddy_visc, loss_weight=None, log_gamma=None,
-                    prt=None):
+    def getRansLoss(self, uc, gradc, eddy_visc, loss_weight=None, prt=None):
         """
         This function provides a baseline loss from a fixed turbulent Pr_t assumption.
         
@@ -814,9 +827,7 @@ class TBNNS(object):
         eddy_visc -- numpy array, shape (n_points,) containing the eddy viscosity
                      (with units of m^2/s) from RANS calculation
         loss_weight -- numpy array of shape (num_points). Optional, only needed for
-                       specific loss types.
-        log_gamma -- numpy array of shape (num_points). Optional, only needed for the 
-                     combined model.
+                       specific loss types.        
         prt -- optional, number containing the fixed turbulent Prandtl number to use.
                If None, use the value specified in contants.py
                
@@ -824,7 +835,10 @@ class TBNNS(object):
         loss - the mean value of the loss from using the fixed Pr_t assumption
         """
         
-        self.assertArguments(loss_weight, log_gamma)
+        self.assertArguments(loss_weight)
+        
+        # Calculates log(gamma) based on quantities received
+        log_gamma = utils.calculateLogGamma(uc, gradc, eddy_visc)
         
         # uc_rans calculated with fixed Pr_t
         if prt is None:
@@ -838,13 +852,11 @@ class TBNNS(object):
             loss_pred = layers.lossL2k(uc, uc_rans, loss_weight)
         if self.FLAGS['loss_type'] == 'l2':
             loss_pred = layers.lossL2(uc, uc_rans, loss_weight)
+        if self.FLAGS['loss_type'] == 'cos':
+            loss_pred = layers.lossCos(uc, uc_rans)
         
         # Calculate loss gamma
-        if log_gamma is not None:
-            loss_gamma = self.FLAGS['gamma_factor']*\
-                         np.mean((log_gamma-np.log(1.0/prt))**2)
-        else:
-            loss_gamma = 0
+        loss_gamma = np.mean((log_gamma-np.log(1.0/prt))**2)        
         
         return loss_pred, loss_gamma
     
@@ -873,7 +885,8 @@ class TBNNS(object):
         if 'loss_type' in self.FLAGS:
             assert self.FLAGS['loss_type'] == 'log' or \
                    self.FLAGS['loss_type'] == 'l2_k' or \
-                   self.FLAGS['loss_type'] == 'l2', "FLAGS['loss_type'] is not valid!"
+                   self.FLAGS['loss_type'] == 'l2' or \
+                   self.FLAGS['loss_type'] == 'cos', "FLAGS['loss_type'] is not valid!"
         else:            
             self.FLAGS['loss_type'] = constants.LOSS_TYPE
         
@@ -896,19 +909,28 @@ class TBNNS(object):
                    "FLAGS['combined_net'] is not valid!"
         else:
             self.FLAGS['combined_net'] = constants.COMBINED_NET
+            
+        
+        if 'gamma_loss' in self.FLAGS:
+            assert self.FLAGS['gamma_loss'] == True or \
+                   self.FLAGS['gamma_loss'] == False, \
+                   "FLAGS['gamma_loss'] is not valid!"
+        else:
+            self.FLAGS['combined_net'] = False
     
     
-    def assertArguments(self, loss_weight, log_gamma):
+    def assertArguments(self, loss_weight):
         """
-        This function makes sure that loss_weight and log_gamma passed in are
+        This function makes sure that loss_weight passed in is
         appropriate to the flags we have, i.e., they are only None if they are
         not needed.
+        
+        Arguments:
+        loss_weight -- either None or a numpy array of shape (num_points). We need
+                       to make sure it is not None when we need it.
         """
         
-        # Check to see if we have all we need for the current configuration
-        if self.FLAGS['combined_net']:
-            msg = "log_gamma cannot be None since combined_net=True"
-            assert log_gamma is not None, msg            
+        # Check to see if we have all we need for the current configuration                   
         if self.FLAGS['loss_type'] == 'l2' or self.FLAGS['loss_type'] == 'l2_k':
             msg = "loss_weight cannot be None since loss_type=l2 or l2_k"
             assert loss_weight is not None, msg            

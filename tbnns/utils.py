@@ -195,6 +195,38 @@ def applyMask(diff, g, gamma, mask, prt_default):
 
     return diff, g, gamma
     
+
+def calculateLogGamma(uc, gradc, nu_t, tf_flag=False):
+
+    """
+    This function calculates ln(gamma), gamma=1/Pr_t, given u'c', gradc, and 
+    eddy viscosity
+    
+    Arguments:
+    uc -- np.array or tensor containing the u'c' vector, shape [None, 3]
+    gradc -- np.array or tensor containing the concentration gradient, shape [None, 3]
+    nu_t -- np.array or tensor containing the eddy viscosity, shape [None,]
+    tf_flag -- optional argument, bool which says whether we are dealing with tensorflow
+               tensors or with numpy arrays.    
+    
+    Returns:
+    log(gamma) -- np.array or tensor containing the natural log of gamma, shape [None,]
+    """
+    
+    if tf_flag:
+        alpha_t = tf.reduce_sum(-1.0*uc*gradc, axis=1)/tf.reduce_sum(gradc*gradc, axis=1)
+        gamma = alpha_t/nu_t
+        gamma = tf.maximum(gamma, constants.GAMMA_MIN)
+        gamma = tf.minimum(gamma, 1.0/constants.GAMMA_MIN)
+        return tf.log(gamma)
+        
+    else:
+        alpha_t = np.sum(-1.0*uc*gradc, axis=1) / np.sum(gradc**2, axis=1)
+        gamma = alpha_t/nu_t
+        gamma[gamma<constants.GAMMA_MIN] = constants.GAMMA_MIN
+        gamma[gamma>1.0/constants.GAMMA_MIN] = 1.0/constants.GAMMA_MIN        
+        return np.log(gamma)
+    
     
 def suppressWarnings():
     """
