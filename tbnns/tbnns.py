@@ -1,4 +1,4 @@
-#--------------------------------- main.py file ---------------------------------------#
+#--------------------------------- tbnns.py file ---------------------------------------#
 """
 This file contains the definition of the TBNN-s class, which is implemented using 
 tensorflow. This is a Tensor Basis Neural Network that is meant to predict a tensorial
@@ -14,29 +14,12 @@ from tbnns.data_batcher import Batch, BatchGenerator
 from tbnns import constants
 from tbnns import utils
 from tbnns import layers
-from pkg_resources import get_distribution
 
 # Run this to suppress gnarly warnings/info messages from tensorflow
 utils.suppressWarnings()
 
-def printInfo():
-    """
-    Makes sure everything is properly installed.
-    
-    We print a welcome message, and the version of the package. Return 1 at the end
-    if no exceptions were raised.
-    """
-    
-    print('Welcome to TBNN-s - Tensor Basis Neural Network for Scalar Mixing package!')
-    
-    # Get distribution version
-    dist = get_distribution('tbnns')
-    print('Version: {}'.format(dist.version))    
-       
-    return 1 # return this if everything went ok
-    
 
-class TBNNS(object):
+class TBNNS():
     """
     This class contains definitions and methods needed for the TBNN-s class.
     """
@@ -44,14 +27,64 @@ class TBNNS(object):
     def __init__(self):
         """
         Constructor class that initializes the model. Sets instance variables to None.        
-        """        
-        
+        """
         self._tfsession = None
         self.FLAGS = None 
         self.features_mean = None
         self.features_std = None
-        self.saver_path = None
+        self.saver_path = None    
+    
+    
+    def saveToDisk(self, description, path, compress=True, protocol=-1):
+        """
+        Save model meta-data to disk, which is used to restore it later.
+        Note that trainable parameters are directly saved by the train() function.
         
+        Arguments:
+        description -- string, containing he description of the model being saved
+        path -- string containing the path on disk in which the model is saved
+        compress -- optional, boolean that is passed to joblib determining whether to
+                    compress the data saved to disk.
+        protocol -- optional, int containing protocol passed to joblib for saving data
+                    to disk.        
+        """
+    
+        print("Saving to disk...", end="", flush=True)
+        
+        list_variables = [self.FLAGS, self.saver_path, 
+                          self.features_mean, self.features_std]
+        joblib.dump([description, list_variables], path, 
+                    compress=compress, protocol=protocol)
+        
+        print(" Done.", flush=True)        
+    
+    
+    def loadfromDisk(self, path_class, verbose=False):
+        """
+        Invoke the saver to restore a previous set of parameters
+        
+        Arguments:        
+        path_class -- string containing path where file is located.
+        verbose -- boolean flag, whether to print more details about the model.
+                   By default it is False.
+        """
+        
+        # Loading file with metadata from disk
+        description, list_vars = joblib.load(path_class)
+        
+        FLAGS, saved_path, feat_mean, feat_std = list_vars # unpack list_vars
+        self.initializeGraph(FLAGS, feat_mean, feat_std) # initialize      
+        self.saver.restore(self._tfsession, saved_path) # restore previous parameters
+        
+        if verbose:
+            print("Model loaded successfully! Description: {}".format(description))
+            print("FLAGS employed:")
+            for key in self.FLAGS:
+                print(" {} --- {}".format(key, self.FLAGS[key]))
+            self.printTrainableParams()
+        
+        return description
+    
     
     def initializeGraph(self, FLAGS, features_mean=None, features_std=None):
         """
@@ -67,7 +100,7 @@ class TBNNS(object):
         Defines:
         self.global_step -- integer with the number of the current training step
         self.updates -- structure that instructs tensorflow to minimize the loss
-        self.saver -- tf.train.Saver class responsible for saving the parameter values 
+        self._saver -- tf.train.Saver class responsible for saving the parameter values 
                       to disk
         """   
         
@@ -82,19 +115,12 @@ class TBNNS(object):
         # Add all parts of the graph
         tf.reset_default_graph()
         
-        self.addPlaceholders() # placeholders
-
-        # builds the appropriate neural network(s)
-        with tf.variable_scope("model_g"):            
-            self.constructNetG()        
-        if self.FLAGS['combined_net']:
-            with tf.variable_scope("model_gamma"):            
-                self.constructNetLogGamma()
-        
-        #combine basis and add losses to the graph
+        # Builds the graph by calling appropriate function
+        self.constructPlaceholders()                 
+        self.constructNet()       
         self.combineBasis()
-        self.addLoss()        
-        
+        self.constructLoss()
+                
         # Define optimizer and updates
         # (updates is what you need to fetch in session.run to do a gradient update)
         self.global_step = tf.Variable(0, name="global_step", trainable=False)                
@@ -102,14 +128,14 @@ class TBNNS(object):
         self.updates = opt.minimize(self.loss, global_step=self.global_step)
         
         # Define savers (for checkpointing)
-        self.saver = tf.train.Saver(tf.global_variables(), max_to_keep=1)        
+        self._saver = tf.train.Saver(tf.global_variables(), max_to_keep=1)        
         
         # Creates session and initializes global variables
         self._tfsession = tf.Session()
         self._tfsession.run(tf.global_variables_initializer())
         
     
-    def addPlaceholders(self):
+    def constructPlaceholders(self):
         """
         Adds all placeholders for external data into the model
 
@@ -121,7 +147,7 @@ class TBNNS(object):
         self.loss_weight -- placeholder for the loss weight (which is multiplied by
                             the L2 prediction loss element-wise)
         self.log_gamma -- placeholder for the log of gamma=1/Prt which is employed
-                          in the combined model
+                          when FLAGS.loss_gamma is True
         self.drop_prob -- placeholder for dropout probability        
         """
         
@@ -133,11 +159,11 @@ class TBNNS(object):
         self.gradc = tf.placeholder(tf.float32, shape=[None, 3])
         self.eddy_visc = tf.placeholder(tf.float32, shape=[None])
         self.loss_weight = tf.placeholder(tf.float32, shape=[None, 1])
-        self.log_gamma = tf.placeholder(tf.float32, shape=[None])
+        self.log_gamma = tf.placeholder(tf.float32, shape=[None])       
         self.drop_prob = tf.placeholder_with_default(0.0, shape=())
                     
     
-    def constructNetG(self):    
+    def constructNet(self):    
         """
         Creates the neural network that predicts g in the model            
 
@@ -146,49 +172,24 @@ class TBNNS(object):
                   shape (None,num_basis)
         """
         
-        # Creates the first hidden state from the inputs
-        fc1 = layers.FullyConnected(self.FLAGS['num_neurons'], self.drop_prob, name="1")
-        hd1 = fc1.build(self.x_features)
+        with tf.variable_scope("model"):        
+            # Creates the first hidden state from the inputs
+            fc1 = layers.FullyConnected(self.FLAGS['num_neurons'], self.drop_prob, 
+                                        name="1")
+            hd1 = fc1.build(self.x_features)            
+            hd_list = [hd1, ] # list of all hidden states
+            
+            # Creates all other hidden states
+            for i in range(self.FLAGS['num_layers']-1):
+                fc = layers.FullyConnected(self.FLAGS['num_neurons'], self.drop_prob,
+                                          name=str(i+2))
+                hd_list.append(fc.build(hd_list[-1]))
+            
+            # Go from last hidden state to the outputs (g in this case)
+            fc_last = layers.FullyConnected(constants.NUM_BASIS, self.drop_prob, 
+                                           relu=False, name="last")
+            self.g = fc_last.build(hd_list[-1])
         
-        hd_list = [hd1, ] # list of all hidden states
-        
-        # Creates all other hidden states
-        for i in range(self.FLAGS['num_layers']-1):
-            fc = layers.FullyConnected(self.FLAGS['num_neurons'], self.drop_prob,
-                                      name=str(i+2))
-            hd_list.append(fc.build(hd_list[-1]))
-        
-        # Go from last hidden state to the outputs (g in this case)
-        fc_last = layers.FullyConnected(constants.NUM_BASIS, self.drop_prob, 
-                                       relu=False, name="last")
-        self.g = fc_last.build(hd_list[-1])
-        
-    
-    def constructNetLogGamma(self):    
-        """
-        Creates the neural network that predicts log(gamma) in the combined model            
-
-        Defines:
-        self.log_gamma_predicted -- log of gamma=1/Prt predicted by the model
-        """
-        
-        # Creates the first hidden state from the inputs
-        fc1 = layers.FullyConnected(self.FLAGS['num_neurons_gamma'], self.drop_prob, 
-                                    name="1")
-        hd1 = fc1.build(self.x_features)
-        
-        hd_list = [hd1, ] # list of all hidden states
-        
-        # Creates all other hidden states
-        for i in range(self.FLAGS['num_layers_gamma']-1):
-            fc = layers.FullyConnected(self.FLAGS['num_neurons_gamma'], self.drop_prob,
-                                       name=str(i+2))
-            hd_list.append(fc.build(hd_list[-1]))
-        
-        # Go from last hidden state to the output (gamma in this case)
-        fc_last = layers.FullyConnected(1, self.drop_prob, relu=False, name="last")
-        self.log_gamma_predicted = tf.squeeze(fc_last.build(hd_list[-1]))
-
     
     def combineBasis(self):
         """
@@ -199,37 +200,23 @@ class TBNNS(object):
         self.uc_predicted -- predicted value of u'c', shape (None,3)        
         """
         
-        with tf.variable_scope("bases"):
-        
+        with tf.variable_scope("bases"):        
             # shape of [None,num_bases,3,3]    
             mult_bas = tf.multiply(tf.reshape(self.g,shape=[-1,constants.NUM_BASIS,1,1]), 
                                    self.tensor_basis) 
             
-            # just direction of the diffusivity matrix 
-            self.diff_direction = tf.reduce_sum(mult_bas, axis=1)         
+            # diffusivity matrix, shape [None, 3, 3]
+            self.diffusivity = tf.reduce_sum(mult_bas, axis=1)         
             
             # shape of [None,3,1]
-            gradc_ext = tf.expand_dims(self.gradc, -1)
-            
-            # shape of [None, 3], u'c' vector with only direction information
-            self.uc_direction = -1.0*tf.squeeze(tf.matmul(self.diff_direction, gradc_ext))
-            
-            # construct self.diffusivity, tensor of shape [None,3,3]
-            if self.FLAGS['combined_net']:                
-                gamma_now = ( tf.reduce_sum(tf.squeeze(tf.matmul(self.diff_direction, gradc_ext))*self.gradc, axis=1) / tf.reduce_sum(self.gradc*self.gradc, axis=1) )                             
-                self.gamma = tf.exp(self.log_gamma_predicted)                
-                self.diffusivity = self.diff_direction*tf.reshape(self.gamma/gamma_now, [-1,1,1])
-                #self.diffusivity = self.diff_direction                
-            else:
-                self.diffusivity = self.diff_direction
-                self.gamma = tf.constant(1.0)
+            gradc_ext = tf.expand_dims(self.gradc, -1)                  
 
             # shape of [None, 3], full u'c' vector
-            self.uc_predicted = -1.0 * ( tf.expand_dims(self.eddy_visc,-1) *
-                                         tf.squeeze(tf.matmul(self.diffusivity, gradc_ext)) )
+            self.uc_predicted = -1.0*( tf.expand_dims(self.eddy_visc,-1) *
+                                     tf.squeeze(tf.matmul(self.diffusivity, gradc_ext)) )
         
 
-    def addLoss(self):
+    def constructLoss(self):
         """
         Add loss computation to the graph.
 
@@ -254,10 +241,10 @@ class TBNNS(object):
                 self.loss_pred = layers.lossL2(self.uc, self.uc_predicted,
                                                self.loss_weight, tf_flag=True)
             if self.FLAGS['loss_type'] == 'cos':
-                self.loss_pred = layers.lossCos(self.uc, self.uc_direction, tf_flag=True)
+                self.loss_pred = layers.lossCos(self.uc, self.uc_predicted, tf_flag=True)
             
             # Calculate the L2 regularization component of the loss            
-            if self.FLAGS['l2_reg'] == 0: self.loss_reg = tf.constant(0.0)
+            if self.FLAGS['reg_factor'] == 0: self.loss_reg = tf.constant(0.0)
             else:
                 vars = tf.trainable_variables()
                 self.loss_reg = \
@@ -266,27 +253,30 @@ class TBNNS(object):
             # negative diffusivity loss            
             if self.FLAGS['neg_factor'] == 0: self.loss_neg = tf.constant(0.0)
             else:
-                diff_sym = 0.5*(self.diff_direction + 
-                                tf.linalg.matrix_transpose(self.diff_direction))
+                diff_sym = 0.5*(self.diffusivity + 
+                                tf.linalg.matrix_transpose(self.diffusivity))
+                                
                 # e contains eigenvalues of symmetric part, in non-decreasing order
                 e, _ = tf.linalg.eigh(diff_sym) 
                 self.loss_neg = tf.reduce_mean(tf.maximum(-tf.reduce_min(e,axis=1),0))
-            
-            # loss due to mismatch of gamma
-            if self.FLAGS['combined_net']:
-                self.loss_gamma = tf.reduce_mean((self.log_gamma_predicted-self.log_gamma)**2)                
-            elif self.FLAGS['gamma_loss']:                
+                
+                # Add diagonal elements smaller than GAMMA_MIN to this loss
+                self.loss_neg += (-1.0/3)*tf.reduce_mean(tf.minimum(self.diffusivity[:,0,0]-constants.GAMMA_MIN,0)
+                                                       + tf.minimum(self.diffusivity[:,1,1]-constants.GAMMA_MIN,0)
+                                                       + tf.minimum(self.diffusivity[:,2,2]-constants.GAMMA_MIN,0))
+                                                       
+            # loss due to mismatch of gamma                            
+            if self.FLAGS['gamma_factor'] == 0: self.loss_gamma = tf.constant(0.0)
+            else:
                 log_gamma_implied = utils.calculateLogGamma(self.uc_predicted,
                                                             self.gradc, self.eddy_visc,
                                                             tf_flag=True)
                 self.loss_gamma = \
                              tf.reduce_mean((log_gamma_implied-self.log_gamma)**2)           
-            else:
-                self.loss_gamma = tf.constant(0.0)
             
             # Loss is the sum of different components
             self.loss = (self.loss_pred 
-                         + self.FLAGS['l2_reg']*self.loss_reg 
+                         + self.FLAGS['reg_factor']*self.loss_reg 
                          + self.FLAGS['neg_factor']*self.loss_neg
                          + self.FLAGS['gamma_factor']*self.loss_gamma)  
             
@@ -375,24 +365,20 @@ class TBNNS(object):
         Returns:
         diff -- the diffusivity tensor for this batch, a numpy array of shape (None,3,3)
         g -- the coefficient multiplying each tensor basis, a numpy array of 
-             shape (None,num_basis)
-        gamma -- the coefficient that multiplies the diffusivity tensor, 1/Pr_t. If
-                 the combined_net mode is active, this is predicted by the network.
-                 Otherwise, this will just be 1.
+             shape (None,num_basis)        
         """
         
         input_feed = {}
         input_feed[self.x_features] = batch.x_features        
-        input_feed[self.tensor_basis] = batch.tensor_basis
-        input_feed[self.gradc] = batch.gradc
+        input_feed[self.tensor_basis] = batch.tensor_basis       
                         
         # output_feed contains the things we want to fetch.
-        output_feed = [self.diffusivity, self.g, self.gamma]
+        output_feed = [self.diffusivity, self.g]
         
         # Run the model
-        [diff, g, gamma] = self._tfsession.run(output_feed, input_feed)
+        [diff, g] = self._tfsession.run(output_feed, input_feed)
         
-        return diff, g, np.squeeze(gamma)
+        return diff, g
     
     
     def getTotalLosses(self, x_features, tensor_basis, uc, gradc, eddy_visc,
@@ -480,8 +466,8 @@ class TBNNS(object):
         
         # Report the number of non-PSD matrices
         if report_psd:
-            diff, _, _ = self.getTotalDiffusivity(x_features, tensor_basis, gradc, 
-                                                  normalize=False, clean=False)
+            diff, _, = self.getTotalDiffusivity(x_features, tensor_basis, 
+                                                normalize=False, clean=False)
             diff_sym = 0.5*(diff+np.transpose(diff,axes=(0,2,1)))
             eig_all, _ = np.linalg.eigh(diff_sym)
             eig_min = np.amin(eig_all, axis=1)
@@ -493,7 +479,7 @@ class TBNNS(object):
                 total_loss_gamma, 0)
      
      
-    def getTotalDiffusivity(self, test_x_features, test_tensor_basis, test_gradc, 
+    def getTotalDiffusivity(self, test_x_features, test_tensor_basis, 
                             normalize=True, clean=True, n_std=None, prt_default=None, 
                             gamma_min=None):
         """
@@ -524,16 +510,12 @@ class TBNNS(object):
         total_diff -- dimensionless diffusivity predicted, numpy array of shape 
                       (num_points, 3, 3)
         total_g -- coefficients that multiply each of the tensor basis predicted, a
-                   numpy array of shape (num_points, num_basis)
-        total_gamma -- numpy array containing gamma=1/Prt, which is predicted by the
-                       combined model on the way to getting the diffusivity. Shape
-                       (num_points)
+                   numpy array of shape (num_points, num_basis)        
         """
     
         num_points = test_x_features.shape[0]
         total_diff = np.empty((num_points, 3, 3))
-        total_g = np.empty((num_points, constants.NUM_BASIS))
-        total_gamma = np.empty(num_points)
+        total_g = np.empty((num_points, constants.NUM_BASIS))        
         i = 0 # marks the index where the current batch starts       
         
         # This normalizes the inputs. Runs when normalize = True
@@ -542,39 +524,33 @@ class TBNNS(object):
                     
         # Initialize batch generator. We do not call reset() to avoid shuffling the batch
         batch_gen = BatchGenerator(constants.TEST_BATCH_SIZE, test_x_features, 
-                                   test_tensor_basis, gradc=test_gradc)                      
+                                   test_tensor_basis)                      
         
         # Iterate through all batches of data
         batch = batch_gen.nextBatch()
         while batch is not None:
-            n_batch = batch.x_features.shape[0] # number of points in this batch
-            results = self.getDiffusivity(batch)
-            total_diff[i:i+n_batch,:,:] = results[0]
-            total_g[i:i+n_batch,:] = results[1]
-            total_gamma[i:i+n_batch] = results[2]
+            n_batch = batch.x_features.shape[0] # number of points in this batch            
+            total_diff[i:i+n_batch], total_g[i:i+n_batch] = self.getDiffusivity(batch)                       
             i += n_batch
             batch = batch_gen.nextBatch()
         
         # Clean the resulting diffusivity
         if clean:
-            total_diff, total_g, total_gamma = utils.cleanDiffusivity(total_diff, 
-                                                   total_g, total_gamma, test_x_features,
-                                                   n_std, prt_default, gamma_min)
-        
-        return total_diff, total_g, total_gamma  
+            total_diff, total_g = utils.cleanDiffusivity(total_diff, total_g, 
+                                                         test_x_features, n_std,
+                                                         prt_default, gamma_min)        
+        return total_diff, total_g  
         
     
-    def train(self, num_epochs, path_to_saver,
-            train_x_features, train_tensor_basis, train_uc, train_gradc, train_eddy_visc,
-            dev_x_features, dev_tensor_basis, dev_uc, dev_gradc, dev_eddy_visc, 
-            train_loss_weight=None, dev_loss_weight=None,           
-            update_stats=True, early_stop_dev=0, downsample_devloss=None, 
-            detailed_losses=False):
+    def train(self, path_to_saver,
+              train_x_features, train_tensor_basis, train_uc, train_gradc, train_eddy_visc,
+              dev_x_features, dev_tensor_basis, dev_uc, dev_gradc, dev_eddy_visc, 
+              train_loss_weight=None, dev_loss_weight=None, early_stop_dev=None,          
+              update_stats=True, downsample_devloss=None, detailed_losses=False):
         """
         This method trains the model.
         
         Inputs:        
-        num_epochs -- int, contains max number of epochs to train the model for
         path_to_saver -- string containing the location in disk where the model 
                          parameters will be saved after it is trained. 
         train_x_features -- numpy array containing the features in the training set,
@@ -613,7 +589,7 @@ class TBNNS(object):
                           early if the dev loss is not going down anymore. Note that this
                           quantities number of times we measure the dev loss, i.e.,
                           early_stop_dev * FLAGS['eval_every'] iterations. If this is
-                          zero, then it is deactivated.
+                          zero, then it is deactivated. If it is None, read from FLAGS
         downsample_devloss -- optional argument, controls whether and how much to
                             subsample the dev set to calculate losses. If the dev set
                             is very big, calculating the full loss can be slow, so you
@@ -638,7 +614,10 @@ class TBNNS(object):
         
         # Calculates log(gamma) based on quantities received
         train_log_gamma = utils.calculateLogGamma(train_uc, train_gradc, train_eddy_visc)
-        dev_log_gamma = utils.calculateLogGamma(dev_uc, dev_gradc, dev_eddy_visc)
+                
+        # If early_stop_dev is None, get value from FLAGS
+        if early_stop_dev is None:
+            early_stop_dev = self.FLAGS['early_stop_dev']
         
         print("Training...", flush=True)        
         self.saver_path = path_to_saver
@@ -667,12 +646,11 @@ class TBNNS(object):
                                    train_loss_weight, train_log_gamma)
         
         # This loop goes over the epochs        
-        for ep in range(num_epochs):
-            tic = timeit.default_timer()
-        
-            batch_gen.reset() # reset batch generator before each epoch
-        
+        for ep in range(self.FLAGS['num_epochs']):
+            tic = timeit.default_timer()        
+                  
             # Iterates through batches of data
+            batch_gen.reset() # reset batch generator before each epoch
             batch = batch_gen.nextBatch()        
             while batch is not None:
                 loss, step = self.runTrainIter(batch) # take one training step
@@ -693,7 +671,7 @@ class TBNNS(object):
                                                      downsample=downsample_devloss,
                                                      report_psd=True)          
                         (loss_dev, loss_dev_pred, loss_dev_reg, loss_dev_neg,
-                         loss_dev_gamma, ratio_psd) = losses                                   
+                         loss_dev_gamma, ratio_psd) = losses
                         
                         print(" Exp Train: {:g} | Dev: {:g}".format(exp_loss, loss_dev)
                               + " ({:.3f}% non-PSD)".format(100*ratio_psd), flush=True)
@@ -723,13 +701,13 @@ class TBNNS(object):
                         print("(*) New best prediction loss: {:g}".format(loss_dev_pred),
                               flush=True)
                         best_dev_loss = loss_dev_pred
-                        self.saver.save(self._tfsession, self.saver_path)
+                        self._saver.save(self._tfsession, self.saver_path)
                         cur_iter_dev = 0
                     else:
                         cur_iter_dev += 1 # number of checks since dev loss last improved
                     
                     # Detects early stopping in the dev set
-                    if early_stop_dev > 0 and cur_iter_dev > early_stop_dev:
+                    if (early_stop_dev > 0 and cur_iter_dev > early_stop_dev):
                         to_break = True
                         break                        
                 
@@ -754,82 +732,30 @@ class TBNNS(object):
         if early_stop_dev == 0:
             print("Saving model with dev prediction loss {:g}... ".format(end_dev_loss), 
                   end="", flush=True)
-            self.saver.save(self._tfsession, self.saver_path)
+            self._saver.save(self._tfsession, self.saver_path)
         else:
             print("End model has dev prediction loss {:g}... ".format(end_dev_loss), 
-                  end="", flush=True)
-            
+                  end="", flush=True)            
         
         print("Done!", flush=True)
         
-        return best_dev_loss, end_dev_loss, step_list, train_loss_list, dev_loss_list
+        return best_dev_loss, end_dev_loss, step_list, train_loss_list, dev_loss_list    
+           
     
-    
-    def saveToDisk(self, description, path, compress=True, protocol=-1):
-        """
-        Save model meta-data to disk, which is used to restore it later.
-        Note that trainable parameters are directly saved by the train() function.
-        
-        Arguments:
-        description -- string, containing he description of the model being saved
-        path -- string containing the path on disk in which the model is saved
-        compress -- optional, boolean that is passed to joblib determining whether to
-                    compress the data saved to disk.
-        protocol -- optional, int containing protocol passed to joblib for saving data
-                    to disk.        
-        """
-    
-        print("Saving to disk...", end="", flush=True)
-        
-        list_variables = [self.FLAGS, self.saver_path, 
-                          self.features_mean, self.features_std]
-        joblib.dump([description, list_variables], path, 
-                    compress=compress, protocol=protocol)
-        
-        print(" Done.", flush=True)    
-        
-    
-    def loadfromDisk(self, path_class, verbose=False):
-        """
-        Invoke the saver to restore a previous set of parameters
-        
-        Arguments:        
-        path_class -- string containing path where file is located.
-        verbose -- boolean flag, whether to print more details about the model.
-                   By default it is False.
-        """
-        
-        # Loading file with metadata from disk
-        description, list_vars = joblib.load(path_class)
-        
-        FLAGS, saved_path, feat_mean, feat_std = list_vars # unpack list_vars
-        self.initializeGraph(FLAGS, feat_mean, feat_std) # initialize      
-        self.saver.restore(self._tfsession, saved_path) # restore previous parameters
-        
-        if verbose:
-            print("Model loaded successfully! Description: {}".format(description))
-            print("FLAGS employed:")
-            for key in self.FLAGS:
-                print(" {} --- {}".format(key, self.FLAGS[key]))
-            self.printTrainableParams()
-        
-        return description       
-        
-    
-    def getRansLoss(self, uc, gradc, eddy_visc, loss_weight=None, prt=None):
+    def getRansLoss(self, uc, gradc, eddy_visc, loss_weight=None, prt_default=None):
         """
         This function provides a baseline loss from a fixed turbulent Pr_t assumption.
         
         Arguments:
-        uc -- numpy array, shape (n_points, 3) containing the true u'c' vector
+        uc -- numpy array, shape (n_points, 3) containing the true (LES) u'c' vector
         gradc -- numpy array, shape (n_points, 3) containing the gradient of scalar
                  concentration
         eddy_visc -- numpy array, shape (n_points,) containing the eddy viscosity
                      (with units of m^2/s) from RANS calculation
         loss_weight -- numpy array of shape (num_points). Optional, only needed for
                        specific loss types.        
-        prt -- optional, number containing the fixed turbulent Prandtl number to use.
-               If None, use the value specified in contants.py
+        prt_default -- optional, number containing the fixed turbulent Prandtl number
+                       to use. If None, use the value specified in constants.py
                
         Returns:
         loss - the mean value of the loss from using the fixed Pr_t assumption
@@ -841,9 +767,9 @@ class TBNNS(object):
         log_gamma = utils.calculateLogGamma(uc, gradc, eddy_visc)
         
         # uc_rans calculated with fixed Pr_t
-        if prt is None:
-            prt = constants.PR_T        
-        uc_rans = -1.0 * (np.expand_dims(eddy_visc/prt, 1)) * gradc
+        if prt_default is None:
+            prt_default = constants.PR_T        
+        uc_rans = -1.0 * (np.expand_dims(eddy_visc/prt_default, 1)) * gradc
         
         # return appropriate loss here
         if self.FLAGS['loss_type'] == 'log':
@@ -856,23 +782,10 @@ class TBNNS(object):
             loss_pred = layers.lossCos(uc, uc_rans)
         
         # Calculate loss gamma
-        loss_gamma = np.mean((log_gamma-np.log(1.0/prt))**2)        
+        loss_gamma = np.mean((log_gamma-np.log(1.0/prt_default))**2)        
         
         return loss_pred, loss_gamma
     
-    
-    def printTrainableParams(self):
-        """
-        Call this function to print all trainable parameters of the model.
-        """
-        
-        # Prints all trainable parameters for sanity check
-        params = tf.trainable_variables()
-        print("This model has {} trainable parameters. They are:".format(len(params)))
-        for i, v in enumerate(params):
-            print("{}: {}".format(i, v.name))
-            print("\t shape: {} size: {}".format(v.shape, np.prod(v.shape)))
-
             
     def checkFlags(self):
         """
@@ -881,6 +794,26 @@ class TBNNS(object):
         to default values.
         """
         
+        # Check regularization strength (reg_factor)
+        if 'reg_factor' in self.FLAGS:   
+            assert self.FLAGS['reg_factor'] >= 0, "FLAGS['reg_factor'] can't be negative"
+        else:            
+            self.FLAGS['reg_factor'] = constants.REG_FACTOR
+
+        # Check early stop
+        if 'early_stop_dev' in self.FLAGS:   
+            assert self.FLAGS['early_stop_dev'] >= 0, \
+                      "FLAGS['early_stop_dev'] can't be negative"
+        else:            
+            self.FLAGS['early_stop_dev'] = constants.EARLY_STOP
+        
+        # batch size for training
+        if 'train_batch_size' in self.FLAGS:
+            assert self.FLAGS['train_batch_size'] >= 0, \
+                        "FLAGS['train_batch_size'] can't be negative"
+        else:            
+            self.FLAGS['train_batch_size'] = constants.TRAIN_BATCH_SIZE
+        
         # Check if a loss type has been passed, if not use default
         if 'loss_type' in self.FLAGS:
             assert self.FLAGS['loss_type'] == 'log' or \
@@ -888,37 +821,34 @@ class TBNNS(object):
                    self.FLAGS['loss_type'] == 'l2' or \
                    self.FLAGS['loss_type'] == 'cos', "FLAGS['loss_type'] is not valid!"
         else:            
-            self.FLAGS['loss_type'] = constants.LOSS_TYPE
+            self.FLAGS['loss_type'] = constants.LOSS_TYPE        
         
-        # Check if regularization strength has been passed, if not use default
-        if 'l2_reg' in self.FLAGS:   
-            assert self.FLAGS['l2_reg'] >= 0, "FLAGS['l2_reg'] can't be negative"
-        else:            
-            self.FLAGS['l2_reg'] = constants.L2_REG
-        
-        # Check if negative diffusivity loss strength has been passed, if not use default
+        # Check negative_diffusivity
         if 'neg_factor' in self.FLAGS:
             assert self.FLAGS['neg_factor'] >= 0, "FLAGS['neg_factor'] can't be negative"
         else:            
-            self.FLAGS['neg_factor'] = constants.NEG_FACTOR
-        
-        # Check if combined net flag has been passed, if not use default
-        if 'combined_net' in self.FLAGS:
-            assert self.FLAGS['combined_net'] == True or \
-                   self.FLAGS['combined_net'] == False, \
-                   "FLAGS['combined_net'] is not valid!"
+            self.FLAGS['neg_factor'] = constants.NEG_FACTOR 
+            
+        # Check gamma_loss
+        if 'gamma_factor' in self.FLAGS:
+            assert self.FLAGS['gamma_factor'] >= 0, \
+                  "FLAGS['gamma_factor'] can't be negative"
         else:
-            self.FLAGS['combined_net'] = constants.COMBINED_NET
+            self.FLAGS['gamma_factor'] = constants.GAMMA_FACTOR  
+    
+    
+    def printTrainableParams(self):
+        """
+        Call this function to print all trainable parameters of the model.
+        """        
+        # Prints all trainable parameters for sanity check
+        params = tf.trainable_variables()
+        print("This model has {} trainable parameters. They are:".format(len(params)))
+        for i, v in enumerate(params):
+            print("{}: {}".format(i, v.name))
+            print("\t shape: {} size: {}".format(v.shape, np.prod(v.shape)))
             
         
-        if 'gamma_loss' in self.FLAGS:
-            assert self.FLAGS['gamma_loss'] == True or \
-                   self.FLAGS['gamma_loss'] == False, \
-                   "FLAGS['gamma_loss'] is not valid!"
-        else:
-            self.FLAGS['combined_net'] = False
-    
-    
     def assertArguments(self, loss_weight):
         """
         This function makes sure that loss_weight passed in is
@@ -933,4 +863,4 @@ class TBNNS(object):
         # Check to see if we have all we need for the current configuration                   
         if self.FLAGS['loss_type'] == 'l2' or self.FLAGS['loss_type'] == 'l2_k':
             msg = "loss_weight cannot be None since loss_type=l2 or l2_k"
-            assert loss_weight is not None, msg            
+            assert loss_weight is not None, msg  

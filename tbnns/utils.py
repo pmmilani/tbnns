@@ -51,7 +51,7 @@ def downsampleIdx(n_total, downsample):
     return idx 
 
             
-def cleanDiffusivity(diff, g, gamma, test_inputs, n_std, 
+def cleanDiffusivity(diff, g, test_inputs, n_std, 
                      prt_default, gamma_min, verbose=True):
     """
     This function is called to post-process the diffusivity and g produced for stability
@@ -60,9 +60,7 @@ def cleanDiffusivity(diff, g, gamma, test_inputs, n_std,
     diff -- numpy array of shape (n_useful, 3, 3) containing the originally predicted 
             diffusivity tensor
     g -- numpy array of shape (n_useful, NUM_BASIS) containing the factor that multiplies
-         each tensor basis to produce the tensor diffusivity
-    gamma -- numpy array of shape (n_useful) containing gamma = 1/Prt predicted by the
-             model. Only relevant in the combined_net mode, otherwise it's just 1
+         each tensor basis to produce the tensor diffusivity    
     test_inputs -- numpy array of shape (n_useful, NUM_FEATURES) containing the test 
                    point features that produced the diffusivity tensor we are dealing
                    with.
@@ -82,9 +80,7 @@ def cleanDiffusivity(diff, g, gamma, test_inputs, n_std,
     diff -- numpy array of shape (n_useful, 3, 3) containing the post-processed 
             diffusivity tensor
     g -- numpy array of shape (n_useful, NUM_BASIS) containing the post-processed
-         factor that multiplies each tensor basis to produce the tensor diffusivity
-    gamma -- numpy array of shape (n_useful) containing the post-processed
-             gamma that multiplies (g_i * T_i)          
+         factor that multiplies each tensor basis to produce the tensor diffusivity              
     """
         
     # Get default values if None is passed
@@ -103,7 +99,7 @@ def cleanDiffusivity(diff, g, gamma, test_inputs, n_std,
     # denote extrapolation from the training set
     mask_ext = (np.amax(test_inputs,axis=1) > n_std) + \
                (np.amin(test_inputs,axis=1) < -n_std)
-    diff, g, gamma = applyMask(diff, g, gamma, mask_ext, prt_default)        
+    diff, g = applyMask(diff, g, mask_ext, prt_default)        
     num_ext = np.sum(mask_ext) # total number of entries affected by this step
     #--------------------------------------------------------------------       
     
@@ -112,7 +108,7 @@ def cleanDiffusivity(diff, g, gamma, test_inputs, n_std,
     diff_sym = 0.5*(diff+np.transpose(diff,axes=(0,2,1))) # symmetric part of diff
     eig_all, _ = np.linalg.eigh(diff_sym) 
     eig_min = np.amin(eig_all, axis=1)          
-    diff, g, gamma = applyMask(diff, g, gamma, eig_min < 0, prt_default)   
+    diff, g = applyMask(diff, g, eig_min < 0, prt_default)   
     
     # now, add a complement to increase the minimum eigenvalues beyond gamma_min
     complement = np.zeros_like(eig_min)
@@ -122,7 +118,7 @@ def cleanDiffusivity(diff, g, gamma, test_inputs, n_std,
     diff[:,0,0] = diff[:,0,0] + complement
     diff[:,1,1] = diff[:,1,1] + complement
     diff[:,2,2] = diff[:,2,2] + complement
-    g[:,0] = g[:,0] + complement/gamma    
+    g[:,0] = g[:,0] + complement    
     
     num_eig = np.sum(eig_min <= gamma_min) # number of entries affected by this step
     #--------------------------------------------------------------------     
@@ -153,10 +149,10 @@ def cleanDiffusivity(diff, g, gamma, test_inputs, n_std,
               + "symmetric part = {:g}".format(min_eig)
               + ", minimum diagonal entry = {:g}".format(min_diag), flush=True)   
               
-    return diff, g, gamma
+    return diff, g
 
         
-def applyMask(diff, g, gamma, mask, prt_default):
+def applyMask(diff, g, mask, prt_default):
     """
     This simple function applies a mask to diff and g.
     
@@ -164,9 +160,7 @@ def applyMask(diff, g, gamma, mask, prt_default):
     diff -- numpy array of shape (n_useful, 3, 3) containing the originally predicted 
             diffusivity tensor
     g -- numpy array of shape (n_useful, NUM_BASIS) containing the factor that multiplies
-         each tensor basis to produce the tensor diffusivity
-    gamma -- numpy array of shape (n_useful) containing gamma = 1/Prt predicted by the
-             model. Only relevant in the combined_net mode, otherwise it's just 1
+         each tensor basis to produce the tensor diffusivity    
     mask -- boolean numpy array of shape (n_useful,) containing a mask which is True
             in the places we want to blank out
     prt_default -- float, default value of turbulent Prandlt number used when cleaning
@@ -177,9 +171,7 @@ def applyMask(diff, g, gamma, mask, prt_default):
     diff -- numpy array of shape (n_useful, 3, 3) containing the post-processed 
             diffusivity tensor
     g -- numpy array of shape (n_useful, NUM_BASIS) containing the post-processed
-         factor that multiplies each tensor basis to produce the tensor diffusivity
-    gamma -- numpy array of shape (n_useful) containing the post-processed
-             gamma that multiplies (g_i * T_i)
+         factor that multiplies each tensor basis to produce the tensor diffusivity    
     """
 
     if prt_default is None:
@@ -190,10 +182,9 @@ def applyMask(diff, g, gamma, mask, prt_default):
     diff[mask,1,1] = 1.0/prt_default
     diff[mask,2,2] = 1.0/prt_default
     g[mask, :] = 0
-    g[mask, 0] = 1.0/prt_default
-    gamma[mask] = 1.0
+    g[mask, 0] = 1.0/prt_default    
 
-    return diff, g, gamma
+    return diff, g
     
 
 def calculateLogGamma(uc, gradc, nu_t, tf_flag=False):

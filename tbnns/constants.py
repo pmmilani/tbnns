@@ -23,19 +23,16 @@ PR_T = 0.85
 # points seen at training time and therefore won't be used
 N_STD = 20
 
-# Minimum value of gamma (or 1/Pr_t) when we clean the vectorial diffusivity
-# produced. Higher values are more stable, but more intrusive. Must be
-# greater than zero.
-GAMMA_MIN = 0.01
+# Minimum value of gamma (or 1/Pr_t) when we clean the tensorial diffusivity
+# produced and when we infer gamma from the LES u'c' data. Higher values are
+# more stable, but more intrusive. Must be greater than zero.
+GAMMA_MIN = 0.05
 
-# Default loss type
-LOSS_TYPE = 'log'
-
-# Default L2 regularization strength
-L2_REG = 1e-3
-
-# Default negative diffusivity loss strength
-NEG_FACTOR = 0
-
-# Default flag for the combined model
-COMBINED_NET = False
+# Default values for some entries of the FLAGS dictionary, passed 
+# in to determine the model
+LOSS_TYPE = 'log' # loss_type
+REG_FACTOR = 1e-3 # regularization strength
+NEG_FACTOR = 100 # factor for the negative diffusivity loss
+GAMMA_FACTOR = 0 # gamma_factor, adds gamma mismatch to the loss
+EARLY_STOP = 0 # early_stop_dev; 0 deactivates it
+TRAIN_BATCH_SIZE = 50 # batch size for training
