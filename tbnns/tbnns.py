@@ -59,7 +59,7 @@ class TBNNS():
         print(" Done.", flush=True)        
     
     
-    def loadfromDisk(self, path_class, verbose=False):
+    def loadFromDisk(self, path_class, verbose=False, fn_modify=None):
         """
         Invoke the saver to restore a previous set of parameters
         
@@ -67,14 +67,20 @@ class TBNNS():
         path_class -- string containing path where file is located.
         verbose -- boolean flag, whether to print more details about the model.
                    By default it is False.
+        fn_modify -- function, optional argument. If this is not None, it must be a 
+                     function that takes is a string and outputs another string,
+                     str2 = fn_modify(str1). It is applied to the path where the 
+                     model parameters are saved. This is done to allow for relative
+                     paths when loadfromDisk is called. 
         """
         
         # Loading file with metadata from disk
         description, list_vars = joblib.load(path_class)
         
         FLAGS, saved_path, feat_mean, feat_std = list_vars # unpack list_vars
-        self.initializeGraph(FLAGS, feat_mean, feat_std) # initialize      
-        self.saver.restore(self._tfsession, saved_path) # restore previous parameters
+        self.initializeGraph(FLAGS, feat_mean, feat_std) # initialize
+        if fn_modify is not None: saved_path = fn_modify(saved_path)       
+        self._saver.restore(self._tfsession, saved_path) # restore previous parameters
         
         if verbose:
             print("Model loaded successfully! Description: {}".format(description))
@@ -261,9 +267,9 @@ class TBNNS():
                 self.loss_neg = tf.reduce_mean(tf.maximum(-tf.reduce_min(e,axis=1),0))
                 
                 # Add diagonal elements smaller than GAMMA_MIN to this loss
-                self.loss_neg += (-1.0/3)*tf.reduce_mean(tf.minimum(self.diffusivity[:,0,0]-constants.GAMMA_MIN,0)
-                                                       + tf.minimum(self.diffusivity[:,1,1]-constants.GAMMA_MIN,0)
-                                                       + tf.minimum(self.diffusivity[:,2,2]-constants.GAMMA_MIN,0))
+                self.loss_neg += -0.33*tf.reduce_mean(tf.minimum(self.diffusivity[:,0,0]-constants.GAMMA_MIN,0)
+                                                    + tf.minimum(self.diffusivity[:,1,1]-constants.GAMMA_MIN,0)
+                                                    + tf.minimum(self.diffusivity[:,2,2]-constants.GAMMA_MIN,0))
                                                        
             # loss due to mismatch of gamma                            
             if self.FLAGS['gamma_factor'] == 0: self.loss_gamma = tf.constant(0.0)
@@ -471,12 +477,11 @@ class TBNNS():
             diff_sym = 0.5*(diff+np.transpose(diff,axes=(0,2,1)))
             eig_all, _ = np.linalg.eigh(diff_sym)
             eig_min = np.amin(eig_all, axis=1)
-            ratio_eig = np.sum(eig_min < 0) / eig_min.shape[0]            
-            return (total_loss, total_loss_pred, total_loss_reg, total_loss_neg,
-                    total_loss_gamma, ratio_eig)
+            ratio_eig = np.sum(eig_min < 0) / eig_min.shape[0]
+        else: ratio_eig = None           
         
         return (total_loss, total_loss_pred, total_loss_reg, total_loss_neg,
-                total_loss_gamma, 0)
+                total_loss_gamma, ratio_eig)
      
      
     def getTotalDiffusivity(self, test_x_features, test_tensor_basis, 
@@ -545,8 +550,9 @@ class TBNNS():
     def train(self, path_to_saver,
               train_x_features, train_tensor_basis, train_uc, train_gradc, train_eddy_visc,
               dev_x_features, dev_tensor_basis, dev_uc, dev_gradc, dev_eddy_visc, 
-              train_loss_weight=None, dev_loss_weight=None, early_stop_dev=None,          
-              update_stats=True, downsample_devloss=None, detailed_losses=False):
+              train_loss_weight=None, dev_loss_weight=None, 
+              early_stop_dev=None, update_stats=True, 
+              downsample_devloss=None, detailed_losses=False):
         """
         This method trains the model.
         
@@ -794,12 +800,6 @@ class TBNNS():
         to default values.
         """
         
-        # Check regularization strength (reg_factor)
-        if 'reg_factor' in self.FLAGS:   
-            assert self.FLAGS['reg_factor'] >= 0, "FLAGS['reg_factor'] can't be negative"
-        else:            
-            self.FLAGS['reg_factor'] = constants.REG_FACTOR
-
         # Check early stop
         if 'early_stop_dev' in self.FLAGS:   
             assert self.FLAGS['early_stop_dev'] >= 0, \
@@ -823,18 +823,31 @@ class TBNNS():
         else:            
             self.FLAGS['loss_type'] = constants.LOSS_TYPE        
         
+        # Check regularization strength (reg_factor)
+        if 'reg_factor' in self.FLAGS:   
+            assert self.FLAGS['reg_factor'] >= 0, "FLAGS['reg_factor'] can't be negative"
+        else:            
+            self.FLAGS['reg_factor'] = constants.REG_FACTOR
+        
         # Check negative_diffusivity
         if 'neg_factor' in self.FLAGS:
             assert self.FLAGS['neg_factor'] >= 0, "FLAGS['neg_factor'] can't be negative"
         else:            
             self.FLAGS['neg_factor'] = constants.NEG_FACTOR 
             
-        # Check gamma_loss
+        # Check gamma_factor
         if 'gamma_factor' in self.FLAGS:
             assert self.FLAGS['gamma_factor'] >= 0, \
                   "FLAGS['gamma_factor'] can't be negative"
         else:
             self.FLAGS['gamma_factor'] = constants.GAMMA_FACTOR  
+            
+        # Check dropout rate
+        if 'drop_prob' in self.FLAGS:
+            assert self.FLAGS['drop_prob'] >= 0 and self.FLAGS['drop_prob'] <= 1, \
+                  "FLAGS['drop_prob'] must be between 0 and 1"
+        else:
+            self.FLAGS['drop_prob'] = constants.DROP_PROB  
     
     
     def printTrainableParams(self):
