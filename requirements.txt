@@ -6,4 +6,5 @@
 --index-url https://pypi.python.org/simple/
 
 # List of python libraries to install
-tensorflow>=1.13.1
+tensorflow==1.14.0
+joblib

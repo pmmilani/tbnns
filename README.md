@@ -1,7 +1,8 @@
-## TBNN-s v0.1.0 - Tensor Basis Neural Network for Scalar Mixing
+## TBNN-s v0.2.0 - Tensor Basis Neural Network for Scalar Mixing (DEV)
+
 Author: Pedro M. Milani (email: pmmilani@stanford.edu)
 
-Last modified: 09/16/2019
+Last modified: 09/18/2019
 
 Developed and tested in Python 3.7
 
