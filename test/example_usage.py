@@ -3,7 +3,8 @@
 Quick script showing how to import and use the tbnns package
 """
 
-from tbnns.main import printInfo, TBNNS
+from tbnns import printInfo
+from tbnns.tbnns import TBNNS
 
 def main():
     

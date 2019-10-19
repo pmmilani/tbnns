@@ -11,9 +11,7 @@ import numpy as np
 import joblib
 import timeit
 from tbnns.data_batcher import Batch, BatchGenerator
-from tbnns import constants
-from tbnns import utils
-from tbnns import layers
+from tbnns import constants, utils, layers
 
 # Run this to suppress gnarly warnings/info messages from tensorflow
 utils.suppressWarnings()
@@ -83,11 +81,8 @@ class TBNNS():
         self._saver.restore(self._tfsession, saved_path) # restore previous parameters
         
         if verbose:
-            print("Model loaded successfully! Description: {}".format(description))
-            print("FLAGS employed:")
-            for key in self.FLAGS:
-                print(" {} --- {}".format(key, self.FLAGS[key]))
-            self.printTrainableParams()
+            print("Model loaded successfully! Description: {}".format(description))            
+            self.printModelInfo()
         
         return description
     
@@ -273,12 +268,16 @@ class TBNNS():
                                                        
             # loss due to mismatch of gamma                            
             if self.FLAGS['gamma_factor'] == 0: self.loss_gamma = tf.constant(0.0)
-            else:
+            elif self.FLAGS['reduce_diff'] == False:
                 log_gamma_implied = utils.calculateLogGamma(self.uc_predicted,
                                                             self.gradc, self.eddy_visc,
                                                             tf_flag=True)
                 self.loss_gamma = \
-                             tf.reduce_mean((log_gamma_implied-self.log_gamma)**2)           
+                             tf.reduce_mean((log_gamma_implied-self.log_gamma)**2)
+            else:
+                diff_norm = tf.norm(self.diffusivity, ord=2, axis=(1,2))
+                ctr_diff_flag = tf.math.greater_equal(tf.reduce_sum(self.uc*self.gradc, axis=1), 0)                
+                self.loss_gamma = tf.cond(tf.reduce_any(ctr_diff_flag), lambda: tf.reduce_mean(tf.boolean_mask(diff_norm, ctr_diff_flag)), lambda: tf.constant(0.0))                
             
             # Loss is the sum of different components
             self.loss = (self.loss_pred 
@@ -788,7 +787,10 @@ class TBNNS():
             loss_pred = layers.lossCos(uc, uc_rans)
         
         # Calculate loss gamma
-        loss_gamma = np.mean((log_gamma-np.log(1.0/prt_default))**2)        
+        if self.FLAGS['reduce_diff']:
+            loss_gamma = 1.0/prt_default        
+        else:
+            loss_gamma = np.mean((log_gamma-np.log(1.0/prt_default))**2)        
         
         return loss_pred, loss_gamma
     
@@ -847,14 +849,23 @@ class TBNNS():
             assert self.FLAGS['drop_prob'] >= 0 and self.FLAGS['drop_prob'] <= 1, \
                   "FLAGS['drop_prob'] must be between 0 and 1"
         else:
-            self.FLAGS['drop_prob'] = constants.DROP_PROB  
+            self.FLAGS['drop_prob'] = constants.DROP_PROB
+        
+        # Reduce diffusivity flag, experimental
+        if 'reduce_diff' not in self.FLAGS:
+            self.FLAGS['reduce_diff'] = False
     
     
-    def printTrainableParams(self):
+    def printModelInfo(self):
         """
-        Call this function to print all trainable parameters of the model.
-        """        
-        # Prints all trainable parameters for sanity check
+        Call this function to print all flags and trainable parameters of the model.
+        """
+        # Prints all flags used to train the model
+        print("FLAGS employed:")
+        for key in self.FLAGS:
+            print(" {} --- {}".format(key, self.FLAGS[key]))
+               
+        # Prints all trainable parameters     
         params = tf.trainable_variables()
         print("This model has {} trainable parameters. They are:".format(len(params)))
         for i, v in enumerate(params):
