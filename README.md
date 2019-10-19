@@ -2,7 +2,7 @@
 
 Author: Pedro M. Milani (email: pmmilani@stanford.edu)
 
-Last modified: 09/18/2019
+Last modified: 10/18/2019
 
 Developed and tested in Python 3.7
 
