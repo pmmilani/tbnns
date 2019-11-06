@@ -42,7 +42,7 @@ class Batch(object):
         self.eddy_visc = eddy_visc
         self.loss_weight = loss_weight
         self.log_gamma = log_gamma
-        
+                
 
 class BatchGenerator(object):
     """
@@ -79,7 +79,7 @@ class BatchGenerator(object):
         self.gradc = gradc
         self.eddy_visc = eddy_visc
         self.log_gamma = log_gamma
-        
+                
         # Expand dims if necessary
         if loss_weight is not None:
             if len(loss_weight.shape) == 1:
@@ -136,7 +136,7 @@ class BatchGenerator(object):
         x = self.x_features[idx,:]
                 
         tb = None; uc = None; gradc = None; 
-        eddy_visc = None; loss_weight = None; log_gamma = None
+        eddy_visc = None; loss_weight = None; log_gamma = None;        
         
         if self.tensor_basis is not None:
             tb = self.tensor_basis[idx,:,:,:]
@@ -149,7 +149,7 @@ class BatchGenerator(object):
         if self.loss_weight is not None:
             loss_weight = self.loss_weight[idx]
         if self.log_gamma is not None:
-            log_gamma = self.log_gamma[idx]
+            log_gamma = self.log_gamma[idx]        
         
         # Instantiate and return a Batch
         return Batch(x, tb, uc, gradc, eddy_visc, loss_weight, log_gamma)
