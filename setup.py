@@ -22,8 +22,6 @@ setup(
    install_requires=['tensorflow==1.14.0', 'joblib'], # dependencies
    python_requires='>=3.6',
    classifiers=[
-        "Programming Language :: Python :: 3.7",
-        "License :: OSI Approved :: Apache License",
-        "Operating System :: OS Independent",
-    ],
+        "Programming Language :: Python :: 3.7"
+   ],
 )
