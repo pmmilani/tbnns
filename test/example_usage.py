@@ -5,6 +5,8 @@ Quick script showing how to import and use the tbnns package
 
 from tbnns import printInfo
 from tbnns.tbnns import TBNNS
+import joblib
+import numpy as np
 
 
 def trainNetwork():
@@ -17,7 +19,7 @@ def trainNetwork():
     
     # ----- Construct TBNN-s with specific flags
     FLAGS = {}
-    FLAGS['num_epochs'] = 20
+    FLAGS['num_epochs'] = 50
     FLAGS['early_stop_dev'] = 10    
     FLAGS['num_layers'] = 10 #Number of hidden layers
     FLAGS['num_neurons'] = 30 #Number of hidden units in each layer   
@@ -28,7 +30,7 @@ def trainNetwork():
     FLAGS['reg_factor'] = 1e-2 # L2 regularization strength 
     FLAGS['gamma_factor'] = 0
     FLAGS['reduce_diff'] = True # whether to make gamma_loss penalize diffusivity matrix in counter-gradient diffusion regions    
-    FLAGS['eval_every'] = 1000 # When to evaluate losses
+    FLAGS['eval_every'] = 250 # When to evaluate losses
     FLAGS['train_batch_size'] = 50    
     nn = TBNNS()
     nn.initializeGraph(FLAGS)
@@ -59,9 +61,8 @@ def trainNetwork():
     path_class = 'nn_{}.pckl'.format(CASE)
     
     nn.train(path_params,
-             x_train, tb_train, uc_train, gradc_train, nut_train,
-             x_dev, tb_dev, uc_dev, gradc_dev, nut_dev,
-             train_loss_weight=loss_weight_train, dev_loss_weight=loss_weight_dev,
+             x_r2, tb_r2, uc_r2, gradc_r2, nut_r2,
+             x_r1p5, tb_r1p5, uc_r1p5, gradc_r1p5, nut_r1p5,             
              detailed_losses=True)
     nn.saveToDisk("Testing TBNN-s: {}".format(CASE), path_class)
   
