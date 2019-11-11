@@ -18,7 +18,7 @@ class Batch(object):
     
     def __init__(self, x_features, tensor_basis=None,  
                  uc=None, gradc=None, eddy_visc=None,
-                 loss_weight=None, log_gamma=None):
+                 loss_weight=None, log_gamma=None, gamma_desired=None):
         """
         Constructor method, which takes in all the arrays and stores them.
         
@@ -32,7 +32,12 @@ class Batch(object):
         loss_weight -- numpy array of shape (batch_size,1). Optional, only at training 
                        time and only for specific prediction losses.
         log_gamma -- numpy array of shape (batch_size,). Optional, only at training time
-                     and only for the improved model.
+                     and only for some model types (when gamma_factor > 0 and 
+                     reduce_diff=False)
+        gamma_desired -- numpy array of shape (batch_size, ). Optional, only at training
+                         time for the model when 'enforce_prt'=True. This is a value of
+                         gamma (1.0/Prt) that is predicted by a separate model and that
+                         will be enforced by the NN at training time.
         """
         
         self.x_features = x_features
@@ -42,6 +47,7 @@ class Batch(object):
         self.eddy_visc = eddy_visc
         self.loss_weight = loss_weight
         self.log_gamma = log_gamma
+        self.gamma_desired = gamma_desired
                 
 
 class BatchGenerator(object):
@@ -52,7 +58,7 @@ class BatchGenerator(object):
     
     def __init__(self, batch_size, x_features, tensor_basis=None, 
                  uc=None, gradc=None, eddy_visc=None,
-                 loss_weight=None, log_gamma=None):
+                 loss_weight=None, log_gamma=None, gamma_desired=None):
         """
         Constructor method, which takes in batch size and full arrays.
         
@@ -69,7 +75,12 @@ class BatchGenerator(object):
                        that this function will expand_dims if needed to make it 
                        (num_total,1)
         log_gamma -- numpy array of shape (num_total,). Optional, only needed at training
-                     time for the combined model.
+                     time for some model types (when gamma_factor > 0 and 
+                     reduce_diff=False).
+        gamma_desired -- numpy array of shape (num_total, ). Optional, only at training
+                         time for the model when 'enforce_prt'=True. This is a value of
+                         gamma (1.0/Prt) that is predicted by a separate model and that
+                         will be enforced by the NN at training time.
         """
         
         # Data that will be used in the batches
@@ -79,6 +90,7 @@ class BatchGenerator(object):
         self.gradc = gradc
         self.eddy_visc = eddy_visc
         self.log_gamma = log_gamma
+        self.gamma_desired = gamma_desired
                 
         # Expand dims if necessary
         if loss_weight is not None:
@@ -136,7 +148,8 @@ class BatchGenerator(object):
         x = self.x_features[idx,:]
                 
         tb = None; uc = None; gradc = None; 
-        eddy_visc = None; loss_weight = None; log_gamma = None;        
+        eddy_visc = None; loss_weight = None; log_gamma = None;
+        gamma_desired = None
         
         if self.tensor_basis is not None:
             tb = self.tensor_basis[idx,:,:,:]
@@ -149,7 +162,9 @@ class BatchGenerator(object):
         if self.loss_weight is not None:
             loss_weight = self.loss_weight[idx]
         if self.log_gamma is not None:
-            log_gamma = self.log_gamma[idx]        
+            log_gamma = self.log_gamma[idx]
+        if self.gamma_desired is not None:
+            gamma_desired = self.gamma_desired[idx]
         
         # Instantiate and return a Batch
-        return Batch(x, tb, uc, gradc, eddy_visc, loss_weight, log_gamma)
+        return Batch(x, tb, uc, gradc, eddy_visc, loss_weight, log_gamma, gamma_desired)

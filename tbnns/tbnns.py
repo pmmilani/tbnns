@@ -160,7 +160,8 @@ class TBNNS():
         self.gradc = tf.placeholder(tf.float32, shape=[None, 3])
         self.eddy_visc = tf.placeholder(tf.float32, shape=[None])
         self.loss_weight = tf.placeholder(tf.float32, shape=[None, 1])
-        self.log_gamma = tf.placeholder(tf.float32, shape=[None])        
+        self.log_gamma = tf.placeholder(tf.float32, shape=[None])
+        self.gamma_desired = tf.placeholder(tf.float32, shape=[None])
         self.drop_prob = tf.placeholder_with_default(0.0, shape=())
                     
     
@@ -207,13 +208,32 @@ class TBNNS():
                                    self.tensor_basis) 
             
             # diffusivity matrix, shape [None, 3, 3]
-            self.diffusivity = tf.reduce_sum(mult_bas, axis=1)         
+            self.diffusivity = tf.reduce_sum(mult_bas, axis=1)
             
             # shape of [None,3,1]
-            gradc_ext = tf.expand_dims(self.gradc, -1)                  
-
-            # shape of [None, 3], full u'c' vector
-            self.uc_predicted = -1.0*( tf.expand_dims(self.eddy_visc,-1) *
+            gradc_ext = tf.expand_dims(self.gradc, -1) 
+            
+            # Here, we enforce a given pr_t to the diffusivity matrix (this is passed
+            # in as gamma, potentially provided by a Random Forest model)
+            if self.FLAGS['enforce_prt']:
+                uc = tf.squeeze(tf.matmul(self.diffusivity, gradc_ext))
+                gamma_implied = ( tf.reduce_sum(self.gradc*uc, axis=1) / 
+                                  tf.reduce_sum(self.gradc*self.gradc, axis=1) )                
+                
+                # clip gamma_implied
+                gamma_implied = tf.maximum(gamma_implied, constants.GAMMA_MIN)
+                gamma_implied = tf.minimum(gamma_implied, 1.0/constants.GAMMA_MIN)
+                
+                # Edited diffusivity matrix, shape [None, 3, 3]
+                factor = tf.reshape(self.gamma_desired/gamma_implied, shape=[-1,1,1])                
+                diff_edited = self.diffusivity * factor
+                
+                # shape of [None, 3], full u'c' vector
+                self.uc_predicted = -1.0*( tf.expand_dims(self.eddy_visc,-1) *
+                                     tf.squeeze(tf.matmul(diff_edited, gradc_ext)) )
+            else:
+                # shape of [None, 3], full u'c' vector
+                self.uc_predicted = -1.0*( tf.expand_dims(self.eddy_visc,-1) *
                                      tf.squeeze(tf.matmul(self.diffusivity, gradc_ext)) )
         
 
@@ -318,6 +338,8 @@ class TBNNS():
             input_feed[self.loss_weight] = batch.loss_weight
         if batch.log_gamma is not None: 
             input_feed[self.log_gamma] = batch.log_gamma
+        if batch.gamma_desired is not None: 
+            input_feed[self.gamma_desired] = batch.gamma_desired
                                     
         # output_feed contains the things we want to fetch.
         output_feed = [self.updates, self.loss, self.global_step]
@@ -334,7 +356,7 @@ class TBNNS():
         
         Inputs:        
         batch -- a Batch object containing information necessary for training         
-
+        
         Returns:
         loss -- the loss (averaged across the batch) for this batch.
         loss_pred -- the loss just due to the error between u'c' and u'c'_predicted
@@ -347,14 +369,15 @@ class TBNNS():
         input_feed[self.x_features] = batch.x_features
         input_feed[self.tensor_basis] = batch.tensor_basis
         input_feed[self.uc] = batch.uc
-        input_feed[self.gradc] = batch.gradc
-        
+        input_feed[self.gradc] = batch.gradc        
         input_feed[self.eddy_visc] = batch.eddy_visc
         
         if batch.loss_weight is not None:
             input_feed[self.loss_weight] = batch.loss_weight
         if batch.log_gamma is not None: 
-            input_feed[self.log_gamma] = batch.log_gamma        
+            input_feed[self.log_gamma] = batch.log_gamma
+        if batch.gamma_desired is not None: 
+            input_feed[self.gamma_desired] = batch.gamma_desired
                                 
         # output_feed contains the things we want to fetch.
         output_feed = [self.loss, self.loss_pred, self.loss_reg, self.loss_neg,
@@ -394,8 +417,8 @@ class TBNNS():
     
     
     def getTotalLosses(self, x_features, tensor_basis, uc, gradc, eddy_visc,
-                       loss_weight=None, normalize=True, downsample=None, 
-                       report_psd=False):
+                       loss_weight=None, gamma_desired=None, normalize=True, 
+                       downsample=None, report_psd=False):
         """
         This method takes in a whole dataset and computes the average loss on it.
         
@@ -433,7 +456,7 @@ class TBNNS():
         """
         
         # Make sure it is only None if appropriate flags are set
-        self.assertArguments(loss_weight)
+        self.assertArguments(loss_weight, gamma_desired)
 
         # Calculates log(gamma) based on quantities received
         log_gamma = utils.calculateLogGamma(uc, gradc, eddy_visc)        
@@ -452,10 +475,12 @@ class TBNNS():
         
         # Initialize batch generator, downsampling only if not None        
         idx = utils.downsampleIdx(num_points, downsample)
-        if loss_weight is not None: loss_weight = loss_weight[idx]                
+        if loss_weight is not None: loss_weight = loss_weight[idx]
+        if gamma_desired is not None: gamma_desired = gamma_desired[idx]
         batch_gen = BatchGenerator(constants.TEST_BATCH_SIZE, x_features[idx,:], 
                                    tensor_basis[idx,:,:,:], uc[idx,:], gradc[idx,:],
-                                   eddy_visc[idx], loss_weight, log_gamma[idx])             
+                                   eddy_visc[idx], loss_weight, log_gamma[idx],
+                                   gamma_desired)             
         
         # Iterate through all batches of data
         batch = batch_gen.nextBatch()        
@@ -477,7 +502,7 @@ class TBNNS():
         
         # Report the number of non-PSD matrices
         if report_psd:
-            diff, _, = self.getTotalDiffusivity(x_features, tensor_basis, 
+            diff, _, = self.getTotalDiffusivity(x_features, tensor_basis,                                                
                                                 normalize=False, clean=False)
             diff_sym = 0.5*(diff+np.transpose(diff,axes=(0,2,1)))
             eig_all, _ = np.linalg.eigh(diff_sym)
@@ -490,8 +515,8 @@ class TBNNS():
      
      
     def getTotalDiffusivity(self, test_x_features, test_tensor_basis, 
-                            normalize=True, clean=True, n_std=None, prt_default=None, 
-                            gamma_min=None):
+                            normalize=True, clean=True, 
+                            n_std=None, prt_default=None, gamma_min=None):
         """
         This method takes in a whole test set and computes the diffusivity matrix on it.
         
@@ -555,7 +580,8 @@ class TBNNS():
     def train(self, path_to_saver,
               train_x_features, train_tensor_basis, train_uc, train_gradc, train_eddy_visc,
               dev_x_features, dev_tensor_basis, dev_uc, dev_gradc, dev_eddy_visc, 
-              train_loss_weight=None, dev_loss_weight=None, 
+              train_loss_weight=None, dev_loss_weight=None,
+              train_gamma_desired=None, dev_gamma_desired=None,
               early_stop_dev=None, update_stats=True, 
               downsample_devloss=None, detailed_losses=False):
         """
@@ -620,8 +646,8 @@ class TBNNS():
         """
         
         # Make sure it is only None if appropriate flags are set
-        self.assertArguments(train_loss_weight)
-        self.assertArguments(dev_loss_weight)
+        self.assertArguments(train_loss_weight, train_gamma_desired)
+        self.assertArguments(dev_loss_weight, dev_gamma_desired)
         
         # Calculates log(gamma) based on quantities received
         train_log_gamma = utils.calculateLogGamma(train_uc, train_gradc, train_eddy_visc)       
@@ -654,7 +680,8 @@ class TBNNS():
         batch_gen = BatchGenerator(self.FLAGS['train_batch_size'],
                                    train_x_features, train_tensor_basis, train_uc,
                                    train_gradc, train_eddy_visc,
-                                   train_loss_weight, train_log_gamma)
+                                   train_loss_weight, train_log_gamma, 
+                                   train_gamma_desired)
         
         # This loop goes over the epochs        
         for ep in range(self.FLAGS['num_epochs']):
@@ -678,7 +705,7 @@ class TBNNS():
                     if detailed_losses:
                         losses = self.getTotalLosses(dev_x_features, dev_tensor_basis,
                                                      dev_uc, dev_gradc, dev_eddy_visc,
-                                                     dev_loss_weight,
+                                                     dev_loss_weight, dev_gamma_desired,
                                                      downsample=downsample_devloss,
                                                      report_psd=True)          
                         (loss_dev, loss_dev_pred, loss_dev_reg, loss_dev_neg,
@@ -694,7 +721,7 @@ class TBNNS():
                     else:
                         losses = self.getTotalLosses(dev_x_features, dev_tensor_basis,
                                                      dev_uc, dev_gradc, dev_eddy_visc,
-                                                     dev_loss_weight,
+                                                     dev_loss_weight, dev_gamma_desired,
                                                      downsample=downsample_devloss,
                                                      report_psd=False)          
                         (loss_dev, loss_dev_pred, _, loss_dev_neg, 
@@ -737,6 +764,7 @@ class TBNNS():
                                                           dev_tensor_basis, 
                                                           dev_uc, dev_gradc,
                                                           dev_eddy_visc, dev_loss_weight,
+                                                          dev_gamma_desired,
                                                           downsample=downsample_devloss)
         
         # save the last model if early stopping is deactivated
@@ -771,8 +799,6 @@ class TBNNS():
         Returns:
         loss - the mean value of the loss from using the fixed Pr_t assumption
         """
-        
-        self.assertArguments(loss_weight)
         
         # Calculates log(gamma) based on quantities received
         log_gamma = utils.calculateLogGamma(uc, gradc, eddy_visc)
@@ -824,6 +850,16 @@ class TBNNS():
             else:
                 self.FLAGS[key] = default
         
+        # List of all properties that must be True or False
+        list_keys = ['reduce_diff', 'enforce_prt']
+        list_defaults = [constants.REDUCE_DIFF, constants.ENFORCE_PRT]
+        for key, default in zip(list_keys, list_defaults):
+            if key in self.FLAGS:
+                assert self.FLAGS[key] is True or self.FLAGS['reduce_diff'] is False, \
+                            "FLAGS['{}'] must be True or False!".format(key)
+            else:
+                self.FLAGS[key] = default        
+                
         # Check if a loss type has been passed, if not use default
         if 'loss_type' in self.FLAGS:
             assert self.FLAGS['loss_type'] == 'log' or \
@@ -839,15 +875,7 @@ class TBNNS():
             assert self.FLAGS['drop_prob'] >= 0 and self.FLAGS['drop_prob'] <= 1, \
                   "FLAGS['drop_prob'] must be between 0 and 1"
         else:
-            self.FLAGS['drop_prob'] = constants.DROP_PROB
-        
-        # Reduce diffusivity flag
-        if 'reduce_diff' in self.FLAGS:
-            assert self.FLAGS['reduce_diff'] is True or \
-                   self.FLAGS['reduce_diff'] is False, \
-                        "FLAGS['reduce_diff'] must be True or False!"
-        else:
-            self.FLAGS['reduce_diff'] = False
+            self.FLAGS['drop_prob'] = constants.DROP_PROB   
     
     
     def printModelInfo(self):
@@ -867,7 +895,7 @@ class TBNNS():
             print("\t shape: {} size: {}".format(v.shape, np.prod(v.shape)))
             
         
-    def assertArguments(self, loss_weight):
+    def assertArguments(self, loss_weight, gamma_desired):
         """
         This function makes sure that loss_weight passed in is
         appropriate to the flags we have, i.e., they are only None if they are
@@ -882,4 +910,9 @@ class TBNNS():
         if self.FLAGS['loss_type'] == 'l2' or self.FLAGS['loss_type'] == 'l2_k' or \
            self.FLAGS['loss_type'] == 'l1':
             msg = "loss_weight cannot be None since loss_type=l2 or l2_k or l1"
-            assert loss_weight is not None, msg  
+            assert loss_weight is not None, msg
+
+        # Check to see if we have all we need for the current configuration                   
+        if self.FLAGS['enforce_prt'] == True:
+            msg = "gamma_desired cannot be None since enforce_prt=True"
+            assert gamma_desired is not None, msg
