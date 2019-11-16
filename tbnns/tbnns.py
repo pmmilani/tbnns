@@ -81,7 +81,7 @@ class TBNNS():
         self._saver.restore(self._tfsession, saved_path) # restore previous parameters
         
         if verbose:
-            print("Model loaded successfully! Description: {}".format(description))            
+            print("Model loaded successfully!")           
             self.printModelInfo()
         
         return description
@@ -515,7 +515,7 @@ class TBNNS():
      
      
     def getTotalDiffusivity(self, test_x_features, test_tensor_basis, 
-                            normalize=True, clean=True, 
+                            normalize=True, clean=True, bump_diffusivity=True, 
                             n_std=None, prt_default=None, gamma_min=None):
         """
         This method takes in a whole test set and computes the diffusivity matrix on it.
@@ -529,6 +529,10 @@ class TBNNS():
                      features before feeding them to the neural network. True by default.
         clean -- optional argument, whether to clean the output diffusivity according
                  to the function defined in utils.py. True by default.
+        bump_diffusivity -- bool, optional argument. This decides whether we bump the
+                            diagonal elements of the matrix in case the eigenvalues are 
+                            positive but small. This helps with stability, so it's True
+                            by default.
         n_std -- number of standard deviations around the mean which is the threshold to
                  characterize a point as an outlier. This is passed to the cleaning 
                  function, which sets a default value for all outlier points. By default
@@ -573,7 +577,8 @@ class TBNNS():
         if clean:
             total_diff, total_g = utils.cleanDiffusivity(total_diff, total_g, 
                                                          test_x_features, n_std,
-                                                         prt_default, gamma_min)        
+                                                         prt_default, gamma_min,
+                                                         bump_diff=bump_diffusivity)        
         return total_diff, total_g  
         
     
