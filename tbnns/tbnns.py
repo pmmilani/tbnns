@@ -114,7 +114,7 @@ class TBNNS():
         self.checkFlags()
                 
         # Add all parts of the graph
-        tf.reset_default_graph()
+        tf.compat.v1.reset_default_graph()
         
         # Builds the graph by calling appropriate function
         self.constructPlaceholders()                 
@@ -125,15 +125,16 @@ class TBNNS():
         # Define optimizer and updates
         # (updates is what you need to fetch in session.run to do a gradient update)
         self.global_step = tf.Variable(0, name="global_step", trainable=False)                
-        opt = tf.train.AdamOptimizer(learning_rate=self.FLAGS['learning_rate'])
+        opt = tf.compat.v1.train.AdamOptimizer(learning_rate=self.FLAGS['learning_rate'])
         self.updates = opt.minimize(self.loss, global_step=self.global_step)
         
         # Define savers (for checkpointing)
-        self._saver = tf.train.Saver(tf.global_variables(), max_to_keep=1)        
+        self._saver = tf.compat.v1.train.Saver(tf.compat.v1.global_variables(),
+                                               max_to_keep=1)        
         
         # Creates session and initializes global variables
-        self._tfsession = tf.Session()
-        self._tfsession.run(tf.global_variables_initializer())
+        self._tfsession = tf.compat.v1.Session()
+        self._tfsession.run(tf.compat.v1.global_variables_initializer())
         
     
     def constructPlaceholders(self):
@@ -152,17 +153,17 @@ class TBNNS():
         self.drop_prob -- placeholder for dropout probability        
         """
         
-        self.x_features = tf.placeholder(tf.float32, 
+        self.x_features = tf.compat.v1.placeholder(tf.float32, 
                                      shape=[None, constants.NUM_FEATURES])
-        self.tensor_basis = tf.placeholder(tf.float32, 
+        self.tensor_basis = tf.compat.v1.placeholder(tf.float32, 
                                           shape=[None, constants.NUM_BASIS, 3, 3])
-        self.uc = tf.placeholder(tf.float32, shape=[None, 3])
-        self.gradc = tf.placeholder(tf.float32, shape=[None, 3])
-        self.eddy_visc = tf.placeholder(tf.float32, shape=[None])
-        self.loss_weight = tf.placeholder(tf.float32, shape=[None, 1])
-        self.log_gamma = tf.placeholder(tf.float32, shape=[None])
-        self.gamma_desired = tf.placeholder(tf.float32, shape=[None])
-        self.drop_prob = tf.placeholder_with_default(0.0, shape=())
+        self.uc = tf.compat.v1.placeholder(tf.float32, shape=[None, 3])
+        self.gradc = tf.compat.v1.placeholder(tf.float32, shape=[None, 3])
+        self.eddy_visc = tf.compat.v1.placeholder(tf.float32, shape=[None])
+        self.loss_weight = tf.compat.v1.placeholder(tf.float32, shape=[None, 1])
+        self.log_gamma = tf.compat.v1.placeholder(tf.float32, shape=[None])
+        self.gamma_desired = tf.compat.v1.placeholder(tf.float32, shape=[None])
+        self.drop_prob = tf.compat.v1.placeholder_with_default(0.0, shape=())
                     
     
     def constructNet(self):    
@@ -174,7 +175,7 @@ class TBNNS():
                   shape (None,num_basis)
         """
         
-        with tf.variable_scope("model"):        
+        with tf.compat.v1.variable_scope("model"):        
             # Creates the first hidden state from the inputs
             fc1 = layers.FullyConnected(self.FLAGS['num_neurons'], self.drop_prob, 
                                         name="1")
@@ -202,7 +203,7 @@ class TBNNS():
         self.uc_predicted -- predicted value of u'c', shape (None,3)        
         """
         
-        with tf.variable_scope("bases"):        
+        with tf.compat.v1.variable_scope("bases"):        
             # shape of [None,num_bases,3,3]    
             mult_bas = tf.multiply(tf.reshape(self.g,shape=[-1,constants.NUM_BASIS,1,1]), 
                                    self.tensor_basis) 
@@ -250,7 +251,7 @@ class TBNNS():
                      what gradient descent tries to minimize
         """
         
-        with tf.variable_scope("losses"):
+        with tf.compat.v1.variable_scope("losses"):
                        
             if self.FLAGS['loss_type'] == 'log':
                 self.loss_pred = layers.lossLog(self.uc, self.uc_predicted, tf_flag=True)
@@ -269,7 +270,7 @@ class TBNNS():
             # Calculate the L2 regularization component of the loss            
             if self.FLAGS['reg_factor'] == 0: self.loss_reg = tf.constant(0.0)
             else:
-                vars = tf.trainable_variables()
+                vars = tf.compat.v1.trainable_variables()
                 self.loss_reg = \
                      tf.add_n([tf.nn.l2_loss(v) for v in vars if ('bias' not in v.name)]) 
             

@@ -46,7 +46,7 @@ class FullyConnected(object):
         out -- tensor of outputs, after fully connected + relu + dropout is applied,
                shape [None, out_size]
         """
-        with tf.variable_scope("FC_"+self.name):
+        with tf.compat.v1.variable_scope("FC_"+self.name):
         
             out = tf.contrib.layers.fully_connected(layer_inputs, self.out_size, 
                                                     activation_fn=None)
@@ -77,7 +77,7 @@ def lossLog(uc, uc_predicted, tf_flag=False):
     if tf_flag:
         loss_ratio = ( tf.norm(uc - uc_predicted, ord=2, axis=1) /
                        tf.norm(uc, ord=2, axis=1) )       
-        loss_pred = tf.reduce_mean(tf.log(loss_ratio))        
+        loss_pred = tf.reduce_mean(tf.math.log(loss_ratio))        
         return loss_pred    
     else:
         loss_ratio = ( np.linalg.norm(uc-uc_predicted, ord=2, axis=1) /

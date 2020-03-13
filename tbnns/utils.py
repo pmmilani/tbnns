@@ -290,8 +290,6 @@ def suppressWarnings():
     This function suppresses several warnings from Tensorflow.
     """
     
-    import tensorflow.python.util.deprecation as deprecation
-    deprecation._PRINT_DEPRECATION_WARNINGS = False
     if type(tf.contrib) != type(tf): tf.contrib._warning = None
     os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
     tf.compat.v1.logging.set_verbosity(tf.compat.v1.logging.ERROR)
