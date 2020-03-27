@@ -137,7 +137,7 @@ def lossL2(uc, uc_predicted, one_over_u2c2, tf_flag=False):
                  tensor shape [] depending on tf_flag)    
     """
     
-    FACTOR = 5e4 # factor to multiply the loss so it's O(1)    
+    FACTOR = 4e4 # factor to multiply the loss so it's O(1)    
     if tf_flag:
         loss = tf.math.squared_difference(uc, uc_predicted)*one_over_u2c2                               
         loss_pred = FACTOR*tf.reduce_mean(tf.reduce_sum(loss, axis=1))

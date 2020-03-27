@@ -148,8 +148,9 @@ class TBNNS():
         self.eddy_visc -- placeholder for eddy viscosity
         self.loss_weight -- placeholder for the loss weight (which is multiplied by
                             the L2 prediction loss element-wise)
-        self.log_gamma -- placeholder for the log of gamma=1/Prt which is employed
-                          when FLAGS.loss_gamma is True
+        self.gamma_desired -- placeholder for the log of gamma=1/Prt which is enforced
+                              exactly in the predicted diffusivity when 
+                              FLAGS['enforce_prt'] is True
         self.drop_prob -- placeholder for dropout probability        
         """
         
@@ -160,8 +161,7 @@ class TBNNS():
         self.uc = tf.compat.v1.placeholder(tf.float32, shape=[None, 3])
         self.gradc = tf.compat.v1.placeholder(tf.float32, shape=[None, 3])
         self.eddy_visc = tf.compat.v1.placeholder(tf.float32, shape=[None])
-        self.loss_weight = tf.compat.v1.placeholder(tf.float32, shape=[None, 1])
-        self.log_gamma = tf.compat.v1.placeholder(tf.float32, shape=[None])
+        self.loss_weight = tf.compat.v1.placeholder(tf.float32, shape=[None, None])
         self.gamma_desired = tf.compat.v1.placeholder(tf.float32, shape=[None])
         self.drop_prob = tf.compat.v1.placeholder_with_default(0.0, shape=())
                     
@@ -245,17 +245,23 @@ class TBNNS():
         Defines:
         self.loss_pred -- scalar with the loss due to error between uc_predicted and uc
         self.loss_reg -- scalar with the regularization loss
-        self.loss_neg -- scalar with the component of the loss due to numerically 
-                         unstable negative diffusivities
-        self.loss -- scalar with the total loss (sum of the two components), which is
+        self.loss_psd -- scalar with the component of the loss that penalizes non-PSD
+                         diffusivity matrices, J_PSD
+        self.loss_prt -- scalar with the component of the loss that tries to match
+                         implied Pr_t with the LES-extracted Pr_t
+        self.loss_neg -- scalar with the component of the loss that penalizes magnitude
+                         of the turbulent diffusivity matrix in regions of counter
+                         gradient diffusion
+        self.loss -- scalar with the total loss (sum of all components), which is
                      what gradient descent tries to minimize
         """
         
         with tf.compat.v1.variable_scope("losses"):
-                       
+            
+            # Calculate the prediction loss (i.e., how bad the predicted u'c' is)
             if self.FLAGS['loss_type'] == 'log':
                 self.loss_pred = layers.lossLog(self.uc, self.uc_predicted, tf_flag=True)
-            if self.FLAGS['loss_type'] == 'l2_k':
+            if self.FLAGS['loss_type'] == 'l2k':
                 self.loss_pred = layers.lossL2k(self.uc, self.uc_predicted, 
                                                 self.loss_weight, tf_flag=True)
             if self.FLAGS['loss_type'] == 'l2':
@@ -274,24 +280,29 @@ class TBNNS():
                 self.loss_reg = \
                      tf.add_n([tf.nn.l2_loss(v) for v in vars if ('bias' not in v.name)]) 
             
-            # negative diffusivity loss            
-            if self.FLAGS['neg_factor'] == 0: self.loss_neg = tf.constant(0.0)
+            # Calculate J_PSD, the loss that enforces predicted diffusivity is PSD            
+            if self.FLAGS['c_psd'] == 0: self.loss_psd = tf.constant(0.0)
             else:
                 diff_sym = 0.5*(self.diffusivity + 
                                 tf.linalg.matrix_transpose(self.diffusivity))
                                 
                 # e contains eigenvalues of symmetric part, in non-decreasing order
                 e, _ = tf.linalg.eigh(diff_sym) 
-                self.loss_neg = tf.reduce_mean(tf.maximum(-tf.reduce_min(e,axis=1),0))               
-                                                       
-            # gamma loss (either due to mismatch of gamma or in negative diff regions)                            
-            if self.FLAGS['gamma_factor'] == 0: self.loss_gamma = tf.constant(0.0)
-            elif self.FLAGS['reduce_diff'] == False:
+                self.loss_psd = tf.reduce_mean(tf.maximum(-tf.reduce_min(e,axis=1),0))               
+            
+            # Calculate J_PRT, the loss that tries to match implied Pr_t with LES Pr_t
+            if self.FLAGS['c_prt'] == 0: self.loss_prt = tf.constant(0.0)
+            else:
                 log_gamma_implied = utils.calculateLogGamma(self.uc_predicted,
                                                             self.gradc, self.eddy_visc,
                                                             tf_flag=True)
-                self.loss_gamma = \
-                             tf.reduce_mean(tf.abs(log_gamma_implied-self.log_gamma))
+                log_gamma_les = utils.calculateLogGamma(self.uc, self.gradc, 
+                                                        self.eddy_visc, tf_flag=True)
+                self.loss_prt = tf.reduce_mean((log_gamma_implied-log_gamma_les)**2)                
+            
+            # Calculate J_NEG, the loss that penalizes the diffusivity magnitude in 
+            # regions of negative diffusivity
+            if self.FLAGS['c_neg'] == 0: self.loss_neg = tf.constant(0.0)            
             else:
                 # appropriate norm of the diffusivity matrix
                 diff_norm = tf.norm(self.diffusivity, ord=2, axis=[1,2])
@@ -302,7 +313,7 @@ class TBNNS():
                 # take the mean of the diffusivity norm in locations where there is 
                 # counter gradient transport. tf.cond is used to return zero if no points
                 # contain counter gradient transport
-                self.loss_gamma = tf.cond(tf.reduce_any(ctr_grad_flag), 
+                self.loss_neg = tf.cond(tf.reduce_any(ctr_grad_flag), 
                                   lambda: tf.reduce_mean(tf.boolean_mask(diff_norm,
                                                                          ctr_grad_flag)),
                                   lambda: tf.constant(0.0) )                
@@ -310,8 +321,9 @@ class TBNNS():
             # Loss is the sum of different components
             self.loss = (self.loss_pred 
                          + self.FLAGS['reg_factor']*self.loss_reg 
-                         + self.FLAGS['neg_factor']*self.loss_neg
-                         + self.FLAGS['gamma_factor']*self.loss_gamma)
+                         + self.FLAGS['c_psd']*self.loss_psd
+                         + self.FLAGS['c_prt']*self.loss_prt
+                         + self.FLAGS['c_neg']*self.loss_neg)
             
 
     def runTrainIter(self, batch):
@@ -336,9 +348,7 @@ class TBNNS():
         input_feed[self.drop_prob] = self.FLAGS['drop_prob'] # apply dropout
         
         if batch.loss_weight is not None:
-            input_feed[self.loss_weight] = batch.loss_weight
-        if batch.log_gamma is not None: 
-            input_feed[self.log_gamma] = batch.log_gamma
+            input_feed[self.loss_weight] = batch.loss_weight        
         if batch.gamma_desired is not None: 
             input_feed[self.gamma_desired] = batch.gamma_desired
                                     
@@ -362,8 +372,13 @@ class TBNNS():
         loss -- the loss (averaged across the batch) for this batch.
         loss_pred -- the loss just due to the error between u'c' and u'c'_predicted
         loss_reg -- the regularization component of the loss
-        loss_neg -- the component of the loss due to negative diffusivity
-        loss_gamma -- the component of the loss due to mismatch of gamma 
+        loss_psd -- component of the loss that penalizes non-PSD
+                         diffusivity matrices, J_PSD
+        loss_prt -- component of the loss that tries to match
+                         implied Pr_t with the LES-extracted Pr_t
+        loss_neg -- component of the loss that penalizes magnitude
+                         of the turbulent diffusivity matrix in regions of counter
+                         gradient diffusion 
         """
         
         input_feed = {}
@@ -374,21 +389,19 @@ class TBNNS():
         input_feed[self.eddy_visc] = batch.eddy_visc
         
         if batch.loss_weight is not None:
-            input_feed[self.loss_weight] = batch.loss_weight
-        if batch.log_gamma is not None: 
-            input_feed[self.log_gamma] = batch.log_gamma
+            input_feed[self.loss_weight] = batch.loss_weight        
         if batch.gamma_desired is not None: 
             input_feed[self.gamma_desired] = batch.gamma_desired
                                 
         # output_feed contains the things we want to fetch.
-        output_feed = [self.loss, self.loss_pred, self.loss_reg, self.loss_neg,
-                       self.loss_gamma]        
+        output_feed = [self.loss, self.loss_pred, self.loss_reg, self.loss_psd,
+                       self.loss_prt, self.loss_neg]        
         
         # Run the model
-        [loss, loss_pred, loss_reg, 
-        loss_neg, loss_gamma] = self._tfsession.run(output_feed, input_feed)
+        [loss, loss_pred, loss_reg, loss_psd,  
+        loss_prt, loss_neg] = self._tfsession.run(output_feed, input_feed)
 
-        return loss, loss_pred, loss_reg, loss_neg, loss_gamma
+        return loss, loss_pred, loss_reg, loss_psd, loss_prt, loss_neg
         
         
     def getDiffusivity(self, batch):
@@ -448,26 +461,28 @@ class TBNNS():
         total_loss -- a scalar, the average total loss for the whole dataset
         total_loss_pred -- a scalar, the average prediction loss for the whole dataset
         total_loss_reg -- a scalar, the average regularization loss for the whole dataset
+        total_loss_psd -- a scalar, the average PSD diffusivity loss for the whole
+                          dataset
+        total_loss_prt -- a scalar, the average Pr_t diffusivity loss for the whole
+                          dataset
         total_loss_neg -- a scalar, the average negative diffusivity loss for the whole
                           dataset
         total_loss_gamma -- a scalar, the average gamma loss for the whole dataset
         ratio_eig -- a scalar, the ratio of non-PSD matrices in the output of the model.
                      This is only calculated if report_psd==True; otherwise, it just 
-                     contains 0.
+                     contains None.
         """
         
         # Make sure it is only None if appropriate flags are set
         self.assertArguments(loss_weight, gamma_desired)
 
-        # Calculates log(gamma) based on quantities received
-        log_gamma = utils.calculateLogGamma(uc, gradc, eddy_visc)        
-        
         # Initializes quantities we need to keep track of
         total_loss = 0
         total_loss_pred = 0
         total_loss_reg = 0
-        total_loss_neg = 0
-        total_loss_gamma = 0
+        total_loss_psd = 0
+        total_loss_prt = 0
+        total_loss_neg = 0        
         num_points = x_features.shape[0]
         
         # This normalizes the inputs. Runs when normalize = True
@@ -480,26 +495,27 @@ class TBNNS():
         if gamma_desired is not None: gamma_desired = gamma_desired[idx]
         batch_gen = BatchGenerator(constants.TEST_BATCH_SIZE, x_features[idx,:], 
                                    tensor_basis[idx,:,:,:], uc[idx,:], gradc[idx,:],
-                                   eddy_visc[idx], loss_weight, log_gamma[idx],
-                                   gamma_desired)             
+                                   eddy_visc[idx], loss_weight, gamma_desired)             
         
         # Iterate through all batches of data
         batch = batch_gen.nextBatch()        
         while batch is not None:
-            this_l, this_lpred, this_lreg, this_lneg, this_lgamma = self.getLoss(batch)
-            total_loss += this_l * batch.x_features.shape[0]
-            total_loss_pred += this_lpred * batch.x_features.shape[0]
-            total_loss_reg += this_lreg * batch.x_features.shape[0]
-            total_loss_neg += this_lneg * batch.x_features.shape[0]
-            total_loss_gamma += this_lgamma * batch.x_features.shape[0]
+            l, l_pred, l_reg, l_psd, l_prt, l_neg = self.getLoss(batch)
+            total_loss += l * batch.x_features.shape[0]
+            total_loss_pred += l_pred * batch.x_features.shape[0]
+            total_loss_reg += l_reg * batch.x_features.shape[0]
+            total_loss_psd += l_psd * batch.x_features.shape[0]
+            total_loss_prt += l_prt * batch.x_features.shape[0]
+            total_loss_neg += l_neg * batch.x_features.shape[0]            
             batch = batch_gen.nextBatch()
         
         # To get an average loss, divide by total number of dev points
         total_loss =  total_loss/num_points
         total_loss_pred = total_loss_pred/num_points
         total_loss_reg = total_loss_reg/num_points
-        total_loss_neg = total_loss_neg/num_points
-        total_loss_gamma = total_loss_gamma/num_points        
+        total_loss_psd = total_loss_psd/num_points
+        total_loss_prt = total_loss_prt/num_points
+        total_loss_neg = total_loss_neg/num_points                
         
         # Report the number of non-PSD matrices
         if report_psd:
@@ -511,8 +527,8 @@ class TBNNS():
             ratio_eig = np.sum(eig_min < 0) / eig_min.shape[0]
         else: ratio_eig = None           
         
-        return (total_loss, total_loss_pred, total_loss_reg, total_loss_neg,
-                total_loss_gamma, ratio_eig)
+        return (total_loss, total_loss_pred, total_loss_reg, total_loss_psd,
+                total_loss_prt, total_loss_neg, ratio_eig)
      
      
     def getTotalDiffusivity(self, test_x_features, test_tensor_basis, 
@@ -654,10 +670,7 @@ class TBNNS():
         # Make sure it is only None if appropriate flags are set
         self.assertArguments(train_loss_weight, train_gamma_desired)
         self.assertArguments(dev_loss_weight, dev_gamma_desired)
-        
-        # Calculates log(gamma) based on quantities received
-        train_log_gamma = utils.calculateLogGamma(train_uc, train_gradc, train_eddy_visc)       
-                
+                       
         # If early_stop_dev is None, get value from FLAGS
         if early_stop_dev is None:
             early_stop_dev = self.FLAGS['early_stop_dev']
@@ -686,8 +699,7 @@ class TBNNS():
         batch_gen = BatchGenerator(self.FLAGS['train_batch_size'],
                                    train_x_features, train_tensor_basis, train_uc,
                                    train_gradc, train_eddy_visc,
-                                   train_loss_weight, train_log_gamma, 
-                                   train_gamma_desired)
+                                   train_loss_weight, train_gamma_desired)
         
         # This loop goes over the epochs        
         for ep in range(self.FLAGS['num_epochs']):
@@ -708,33 +720,26 @@ class TBNNS():
                     # Evaluate dev loss
                     print("Step {}. Evaluating losses:".format(step), end="", flush=True)
                     
+                    losses = self.getTotalLosses(dev_x_features, dev_tensor_basis,
+                                                 dev_uc, dev_gradc, dev_eddy_visc,
+                                                 dev_loss_weight, dev_gamma_desired,
+                                                 downsample=downsample_devloss,
+                                                 report_psd=detailed_losses)          
+                    (loss_dev, loss_dev_pred, loss_dev_reg, loss_dev_psd,
+                     loss_dev_prt, loss_dev_neg, ratio_psd) = losses
+                    
                     if detailed_losses:
-                        losses = self.getTotalLosses(dev_x_features, dev_tensor_basis,
-                                                     dev_uc, dev_gradc, dev_eddy_visc,
-                                                     dev_loss_weight, dev_gamma_desired,
-                                                     downsample=downsample_devloss,
-                                                     report_psd=True)          
-                        (loss_dev, loss_dev_pred, loss_dev_reg, loss_dev_neg,
-                         loss_dev_gamma, ratio_psd) = losses
-                        
-                        print(" Exp Train: {:g} | Dev: {:g}".format(exp_loss, loss_dev)
-                              + " ({:.3f}% non-PSD)".format(100*ratio_psd), flush=True)
-                        print("->Breakdown prediction: {:g} |".format(loss_dev_pred)
-                              + " regularize: {:g} |".format(loss_dev_reg)
-                              + " negative diff: {:g} |".format(loss_dev_neg)
-                              + " gamma: {:g}".format(loss_dev_gamma), flush=True)                  
-                    
+                        print(" Exp Train: {:.3f} | Dev: {:.3f}".format(exp_loss, loss_dev)
+                              + " ({:.3f}% non-PSD matrices)".format(100*ratio_psd), flush=True)
+                        print("Dev breakdown -> predict: {:.3f} |".format(loss_dev_pred)
+                              + " regularize: {:.3f} |".format(loss_dev_reg)
+                              + " PSD: {:g} |".format(loss_dev_psd)
+                              + " PRT: {:g} |".format(loss_dev_prt)
+                              + " NEG: {:g}".format(loss_dev_neg), flush=True) 
                     else:
-                        losses = self.getTotalLosses(dev_x_features, dev_tensor_basis,
-                                                     dev_uc, dev_gradc, dev_eddy_visc,
-                                                     dev_loss_weight, dev_gamma_desired,
-                                                     downsample=downsample_devloss,
-                                                     report_psd=False)          
-                        (loss_dev, loss_dev_pred, _, loss_dev_neg, 
-                         loss_dev_gamma, _) = losses                                   
-                        print(" Exp Train: {:g} | Dev: {:g}".format(exp_loss, loss_dev),
+                        print(" Exp Train: {:.3f} | Dev: {:.3f}".format(exp_loss, loss_dev),
                               flush=True)
-                    
+                                       
                     # Append to lists
                     step_list.append(step)
                     train_loss_list.append(exp_loss)
@@ -754,7 +759,9 @@ class TBNNS():
                     if (early_stop_dev > 0 and cur_iter_dev > early_stop_dev):
                         to_break = True
                         break                        
-                
+                    
+                    print("", flush=True) # Print empty line after an evaluation round
+                    
                 batch = batch_gen.nextBatch()
                 
             toc = timeit.default_timer()
@@ -766,7 +773,7 @@ class TBNNS():
                 break                
         
         # Calculate last dev loss 
-        _, end_dev_loss, _, _, _, _ = self.getTotalLosses(dev_x_features, 
+        _, end_dev_loss, _, _, _, _, _ = self.getTotalLosses(dev_x_features, 
                                                           dev_tensor_basis, 
                                                           dev_uc, dev_gradc,
                                                           dev_eddy_visc, dev_loss_weight,
@@ -784,7 +791,7 @@ class TBNNS():
         
         print("Done!", flush=True)
         
-        return best_dev_loss, end_dev_loss, step_list, train_loss_list, dev_loss_list    
+        return best_dev_loss, end_dev_loss, step_list, train_loss_list, dev_loss_list
            
     
     def getRansLoss(self, uc, gradc, eddy_visc, loss_weight=None, prt_default=None):
@@ -803,7 +810,9 @@ class TBNNS():
                        to use. If None, use the value specified in constants.py
                
         Returns:
-        loss - the mean value of the loss from using the fixed Pr_t assumption
+        loss_pred -- the prediction loss from using the fixed Pr_t assumption
+        loss_prt -- the baseline Pr_t loss (J_PRT) with GDH and fixed Pr_t
+        loss_neg -- the baseline negative diffusivity loss (J_NEG) with GDH and fixed Pr_t
         """
         
         # Calculates log(gamma) based on quantities received
@@ -824,14 +833,17 @@ class TBNNS():
         if self.FLAGS['loss_type'] == 'l1':
             loss_pred = layers.lossL1(uc, uc_rans, loss_weight)
         if self.FLAGS['loss_type'] == 'cos':
-            loss_pred = layers.lossCos(uc, uc_rans)        
+            loss_pred = layers.lossCos(uc, uc_rans)
         
-        # Calculate loss gamma
-        if self.FLAGS['gamma_factor'] == 0: loss_gamma = 0
-        elif self.FLAGS['reduce_diff']: loss_gamma = 1.0/prt_default        
-        else: loss_gamma = np.mean(np.abs(log_gamma-np.log(1.0/prt_default)))        
+        # pr_t loss
+        if self.FLAGS['c_prt'] == 0: loss_prt = 0
+        else: loss_prt = np.mean((log_gamma-np.log(1.0/prt_default))**2)
         
-        return loss_pred, loss_gamma
+        # negative diffusivity loss
+        if self.FLAGS['c_neg'] == 0: loss_neg = 0
+        else: loss_neg = 1.0/prt_default              
+        
+        return loss_pred, loss_prt, loss_neg
     
             
     def checkFlags(self):
@@ -844,12 +856,12 @@ class TBNNS():
         # List of all properties that have to be non-negative
         list_keys = ['num_layers', 'num_neurons', 'num_epochs', 'early_stop_dev',
                      'train_batch_size', 'eval_every', 'learning_rate', 'reg_factor', 
-                     'neg_factor', 'gamma_factor']
+                     'c_psd', 'c_prt', 'c_neg']
         list_defaults = [constants.NUM_LAYERS, constants.NUM_NEURONS,
                          constants.EARLY_STOP_DEV, constants.TRAIN_BATCH_SIZE,
                          constants.LEARNING_RATE, constants.EVAL_EVERY,
-                         constants.REG_FACTOR, constants.NEG_FACTOR,
-                         constants.GAMMA_FACTOR]                         
+                         constants.REG_FACTOR, constants.C_PSD, constants.C_PRT,
+                         constants.C_NEG]                        
         for key, default in zip(list_keys, list_defaults):
             if key in self.FLAGS:
                 assert self.FLAGS[key] >= 0, "FLAGS['{}'] can't be negative!".format(key)
@@ -857,11 +869,11 @@ class TBNNS():
                 self.FLAGS[key] = default
         
         # List of all properties that must be True or False
-        list_keys = ['reduce_diff', 'enforce_prt']
-        list_defaults = [constants.REDUCE_DIFF, constants.ENFORCE_PRT]
+        list_keys = ['enforce_prt']
+        list_defaults = [constants.ENFORCE_PRT]
         for key, default in zip(list_keys, list_defaults):
             if key in self.FLAGS:
-                assert self.FLAGS[key] is True or self.FLAGS['reduce_diff'] is False, \
+                assert self.FLAGS[key] is True or self.FLAGS[key] is False, \
                             "FLAGS['{}'] must be True or False!".format(key)
             else:
                 self.FLAGS[key] = default        
@@ -869,7 +881,7 @@ class TBNNS():
         # Check if a loss type has been passed, if not use default
         if 'loss_type' in self.FLAGS:
             assert self.FLAGS['loss_type'] == 'log' or \
-                   self.FLAGS['loss_type'] == 'l2_k' or \
+                   self.FLAGS['loss_type'] == 'l2k' or \
                    self.FLAGS['loss_type'] == 'l2' or \
                    self.FLAGS['loss_type'] == 'l1' or \
                    self.FLAGS['loss_type'] == 'cos', "FLAGS['loss_type'] is not valid!"
@@ -913,9 +925,9 @@ class TBNNS():
         """
         
         # Check to see if we have all we need for the current configuration                   
-        if self.FLAGS['loss_type'] == 'l2' or self.FLAGS['loss_type'] == 'l2_k' or \
+        if self.FLAGS['loss_type'] == 'l2' or self.FLAGS['loss_type'] == 'l2k' or \
            self.FLAGS['loss_type'] == 'l1':
-            msg = "loss_weight cannot be None since loss_type=l2 or l2_k or l1"
+            msg = "loss_weight cannot be None since loss_type=l2 or l2k or l1"
             assert loss_weight is not None, msg
 
         # Check to see if we have all we need for the current configuration                   

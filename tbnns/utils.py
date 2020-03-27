@@ -135,7 +135,7 @@ def cleanDiffusivity(diff, g=None, test_inputs=None, n_std=None,
     diff_sym = 0.5*(diff+np.transpose(diff,axes=(0,2,1))) # symmetric part of diff
     eig_all, _ = np.linalg.eigh(diff_sym) 
     eig_min = np.amin(eig_all, axis=1)          
-    diff, g = applyMask(diff, g, eig_min < 0, 1.0/gamma_min)
+    diff, g = applyMask(diff, g, eig_min < 0, prt_default)
     num_eig = np.sum(eig_min < 0) # number of entries with negative eigenvalue
     #--------------------------------------------------------------------  
     
