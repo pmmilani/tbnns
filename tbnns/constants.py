@@ -13,7 +13,7 @@ TEST_BATCH_SIZE = 10000
 # Turbulent Prandtl number used by default
 PRT_DEFAULT = 0.85
 
-# Number of standard deviations, by default, to clean the features.
+# Number of standard deviations used to clean the features by default.
 # The features at test time are normalized by the mean and standard
 # deviation seen at training time; if any point has features more
 # than N_STD or less than -N_STD, it means it is very different from
