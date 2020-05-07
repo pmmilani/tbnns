@@ -96,7 +96,7 @@ def cleanDiffusivity(diff, g=None, test_inputs=None, n_std=None,
     if n_std is None:
         n_std = constants.N_STD
     if prt_default is None:
-        prt_default = constants.PR_T
+        prt_default = constants.PRT_DEFAULT
     if gamma_min is None:
         gamma_min = constants.GAMMA_MIN
     
@@ -171,16 +171,16 @@ def cleanDiffusivity(diff, g=None, test_inputs=None, n_std=None,
     print("Done! It took {:.1f}s".format(toc-tic), flush=True)
     if verbose:
         if test_inputs is not None:
-            print("{:.3f}% of points were cleaned due to outlier inputs."\
-                  .format(100.0*num_ext/diff.shape[0]), flush=True)
+            print("{} points ({:.2f}% of total) were cleaned due to outlier inputs."\
+                  .format(num_ext, 100.0*num_ext/diff.shape[0]), flush=True)
         if clip_elements:
-            print("{:.3f}% of points were clipped due to extreme values."\
-                  .format(100.0*num_clip/(9*diff.shape[0])), flush=True)        
-        print("{:.3f}% of points were cleaned due to non-PSD matrices."\
-              .format(100.0*num_eig/diff.shape[0]), flush=True)
+            print("{} entries ({:.2f}% of total) were clipped due to extreme values."\
+                  .format(num_clip, 100.0*num_clip/(9*diff.shape[0])), flush=True)        
+        print("{} points ({:.2f}% of total) were cleaned due to non-PSD matrices."\
+              .format(num_eig, 100.0*num_eig/diff.shape[0]), flush=True)
         if bump_diff:            
-            print("{:.3f}% of points had almost non-PSD matrices and were fixed."\
-                  .format(100.0*num_bump/diff.shape[0]), flush=True)
+            print("{} points ({:.2f}% of total) were almost non-PSD and got fixed."\
+                  .format(num_bump, 100.0*num_bump/diff.shape[0]), flush=True)
         print("In cleaned diffusivity: min eigenvalue of "
               + "symmetric part = {:g}".format(min_eig)
               + ", minimum diagonal entry = {:g}".format(min_diag), flush=True)   
@@ -240,7 +240,7 @@ def applyMask(diff, g, mask, prt_default):
     """
 
     if prt_default is None:
-        prt_default = constants.PR_T
+        prt_default = constants.PRT_DEFAULT
     
     diff[mask,:,:] = 0.0
     diff[mask,0,0] = 1.0/prt_default
@@ -256,7 +256,7 @@ def applyMask(diff, g, mask, prt_default):
 
 def calculateLogGamma(uc, gradc, nu_t, tf_flag=False):
     """
-    This function calculates ln(gamma), gamma=1/Pr_t, given u'c', gradc, and 
+    This function calculates log(gamma), where gamma=1/Pr_t, given u'c', gradc, and 
     eddy viscosity
     
     Arguments:
