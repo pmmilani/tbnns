@@ -53,7 +53,7 @@ def downsampleIdx(n_total, downsample):
             
 def cleanDiffusivity(diff, g=None, test_inputs=None, n_std=None, 
                      prt_default=None, gamma_min=None, clip_elements=False,
-                     verbose=True):
+                     bump_diff=True, verbose=True):
     """
     This function is called to post-process the diffusivity and g produced for stability
     
@@ -78,6 +78,9 @@ def cleanDiffusivity(diff, g=None, test_inputs=None, n_std=None,
     clip_elements -- bool, optional argument. This decides whether we clip elements of
                      the matrix to make sure they are not too big or too small. By 
                      default, this is False, so no clipping is applied.
+    bump_diff -- bool, optional argument. This decides whether we bump the
+                 diagonal elements of the matrix in case the eigenvalues are 
+                 positive but small. This helps with stability, so it's True by default.
     verbose -- optional argument, boolean that says whether we print some extra 
                information to the screen.
     
@@ -93,7 +96,7 @@ def cleanDiffusivity(diff, g=None, test_inputs=None, n_std=None,
     if n_std is None:
         n_std = constants.N_STD
     if prt_default is None:
-        prt_default = constants.PR_T
+        prt_default = constants.PRT_DEFAULT
     if gamma_min is None:
         gamma_min = constants.GAMMA_MIN
     
@@ -132,22 +135,24 @@ def cleanDiffusivity(diff, g=None, test_inputs=None, n_std=None,
     diff_sym = 0.5*(diff+np.transpose(diff,axes=(0,2,1))) # symmetric part of diff
     eig_all, _ = np.linalg.eigh(diff_sym) 
     eig_min = np.amin(eig_all, axis=1)          
-    diff, g = applyMask(diff, g, eig_min < 0, prt_default)   
+    diff, g = applyMask(diff, g, eig_min < 0, prt_default)
+    num_eig = np.sum(eig_min < 0) # number of entries with negative eigenvalue
+    #--------------------------------------------------------------------  
     
-    # Now, add a complement to increase the minimum eigenvalues beyond gamma_min
-    complement = np.zeros_like(eig_min)
-    mask = (eig_min >= 0) * (eig_min < gamma_min)
-    complement[mask] = gamma_min - eig_min[mask]
-    assert (complement >= 0).all(), "Negative complement. That's not supposed to happen"
-    diff[:,0,0] = diff[:,0,0] + complement
-    diff[:,1,1] = diff[:,1,1] + complement
-    diff[:,2,2] = diff[:,2,2] + complement
-    if g is not None: g[:,0] = g[:,0] + complement    
-    
-    num_eig = np.sum(eig_min < gamma_min) # number of entries affected by this step
+    # (4) Add a complement to increase the minimum eigenvalues beyond gamma_min
+    if bump_diff:
+        complement = np.zeros_like(eig_min)
+        mask = (eig_min >= 0) * (eig_min < gamma_min)
+        complement[mask] = gamma_min - eig_min[mask]
+        assert (complement >= 0).all(), "Negative complement. Something is wrong..."
+        diff[:,0,0] = diff[:,0,0] + complement
+        diff[:,1,1] = diff[:,1,1] + complement
+        diff[:,2,2] = diff[:,2,2] + complement
+        if g is not None: g[:,0] = g[:,0] + complement   
+        num_bump = np.sum((eig_min<gamma_min)*(eig_min>=0)) # small, positive eigenvalue       
     #--------------------------------------------------------------------     
     
-    # (4) Here, make sure that no diffusivities have negative diagonals.
+    # (5) Here, make sure that no diffusivities have negative diagonals.
     # After cleaning non-PSD, all diagonals should be positive. Throw error if a negative
     # one is found
     t = np.amin([diff[:,0,0],diff[:,1,1],diff[:,2,2]],axis=0) # minimum diagonal entry
@@ -166,13 +171,16 @@ def cleanDiffusivity(diff, g=None, test_inputs=None, n_std=None,
     print("Done! It took {:.1f}s".format(toc-tic), flush=True)
     if verbose:
         if test_inputs is not None:
-            print("{:.3f}% of points were cleaned due to outlier inputs."\
-                  .format(100.0*num_ext/diff.shape[0]), flush=True)
+            print("{} points ({:.2f}% of total) were cleaned due to outlier inputs."\
+                  .format(num_ext, 100.0*num_ext/diff.shape[0]), flush=True)
         if clip_elements:
-            print("{:.3f}% of points were clipped due to extreme values."\
-                  .format(100.0*num_clip/(9*diff.shape[0])), flush=True)
-        print("{:.3f}% of points were cleaned due to non-PSD matrices."\
-              .format(100.0*num_eig/diff.shape[0]), flush=True)        
+            print("{} entries ({:.2f}% of total) were clipped due to extreme values."\
+                  .format(num_clip, 100.0*num_clip/(9*diff.shape[0])), flush=True)        
+        print("{} points ({:.2f}% of total) were cleaned due to non-PSD matrices."\
+              .format(num_eig, 100.0*num_eig/diff.shape[0]), flush=True)
+        if bump_diff:            
+            print("{} points ({:.2f}% of total) were almost non-PSD and got fixed."\
+                  .format(num_bump, 100.0*num_bump/diff.shape[0]), flush=True)
         print("In cleaned diffusivity: min eigenvalue of "
               + "symmetric part = {:g}".format(min_eig)
               + ", minimum diagonal entry = {:g}".format(min_diag), flush=True)   
@@ -232,7 +240,7 @@ def applyMask(diff, g, mask, prt_default):
     """
 
     if prt_default is None:
-        prt_default = constants.PR_T
+        prt_default = constants.PRT_DEFAULT
     
     diff[mask,:,:] = 0.0
     diff[mask,0,0] = 1.0/prt_default
@@ -248,7 +256,7 @@ def applyMask(diff, g, mask, prt_default):
 
 def calculateLogGamma(uc, gradc, nu_t, tf_flag=False):
     """
-    This function calculates ln(gamma), gamma=1/Pr_t, given u'c', gradc, and 
+    This function calculates log(gamma), where gamma=1/Pr_t, given u'c', gradc, and 
     eddy viscosity
     
     Arguments:
@@ -282,8 +290,6 @@ def suppressWarnings():
     This function suppresses several warnings from Tensorflow.
     """
     
-    import tensorflow.python.util.deprecation as deprecation
-    deprecation._PRINT_DEPRECATION_WARNINGS = False
     if type(tf.contrib) != type(tf): tf.contrib._warning = None
     os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
     tf.compat.v1.logging.set_verbosity(tf.compat.v1.logging.ERROR)

@@ -11,7 +11,7 @@ with open("README.md", 'r') as f:
 
 setup(
    name='tbnns',
-   version='0.3.0',
+   version='0.4.0',
    description='TBNN-s - Tensor Basis Neural Network for Scalar Mixing',
    license='Apache',
    long_description=long_description,
@@ -19,7 +19,7 @@ setup(
    author_email='pmmilani@stanford.edu',
    url="https://github.com/pmmilani/tbnns.git",
    packages=['tbnns'],  # same as name
-   install_requires=['tensorflow==1.14.0', 'joblib'], # dependencies
+   install_requires=['tensorflow==1.15.2', 'joblib'], # dependencies
    python_requires='>=3.6',
    classifiers=[
         "Programming Language :: Python :: 3.7"

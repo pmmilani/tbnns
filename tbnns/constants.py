@@ -3,9 +3,6 @@
 This file contains all global constants, for easy access
 """
 
-# number of input invariants used for the model
-NUM_FEATURES = 15
-
 # number of form invariant basis needed for the diffusivity
 NUM_BASIS = 6
 
@@ -14,9 +11,9 @@ NUM_BASIS = 6
 TEST_BATCH_SIZE = 10000
 
 # Turbulent Prandtl number used by default
-PR_T = 0.85
+PRT_DEFAULT = 0.85
 
-# Number of standard deviations, by default, to clean the features.
+# Number of standard deviations used to clean the features by default.
 # The features at test time are normalized by the mean and standard
 # deviation seen at training time; if any point has features more
 # than N_STD or less than -N_STD, it means it is very different from
@@ -30,19 +27,20 @@ GAMMA_MIN = 0.02
 
 # Default values for some entries of the FLAGS dictionary, passed 
 # in to determine the model
-NUM_LAYERS = 10
+NUM_FEATURES = 8
+NUM_LAYERS = 8
 NUM_NEURONS = 30
 NUM_EPOCHS = 0 # how many epochs to run by default (here, run zero)
 EARLY_STOP_DEV = 0 # early_stop_dev; 0 deactivates it
 TRAIN_BATCH_SIZE = 50 # batch size for training
 EVAL_EVERY = 1000 # every this many iterations, check losses
 LEARNING_RATE = 1e-3 # default learning rate for Adam
-REG_FACTOR = 1e-2 # regularization strength
-NEG_FACTOR = 0.1 # factor for the negative diffusivity loss
-GAMMA_FACTOR = 0 # gamma_factor, adds gamma mismatch to the loss
-
 LOSS_TYPE = 'log' # loss_type
+C_REG = 5e-3 # regularization strength
+C_PSD = 0.25 # factor for the PSD loss (J_PSD)
+C_PRT = 0 # factor for the Pr_t loss (J_PRT)
+C_NEG = 0 # factor for the negative diffusivity loss (J_NEG)
 DROP_PROB = 0.2 # dropout probability; 0 deactivates it
-REDUCE_DIFF = False # whether to use gamma loss to reduce diffusivity in zones
-                    # of counter gradient transport
+ENFORCE_PRT = False # whether a separate prediction for Turbulent Prandtl number 
+                    # (or gamma) is passed in and the predicted D must obey it.
 
