@@ -174,23 +174,39 @@ class TBNNS():
                   shape (None,num_basis)
         """
         
-        with tf.compat.v1.variable_scope("model"):        
-            # Creates the first hidden state from the inputs
-            fc1 = layers.FullyConnected(self.FLAGS['num_neurons'], self.drop_prob, 
-                                        name="1")
-            hd1 = fc1.build(self.x_features)            
-            hd_list = [hd1, ] # list of all hidden states
+        with tf.compat.v1.variable_scope("model"):
             
-            # Creates all other hidden states
-            for i in range(self.FLAGS['num_layers']-1):
-                fc = layers.FullyConnected(self.FLAGS['num_neurons'], self.drop_prob,
-                                          name=str(i+2))
-                hd_list.append(fc.build(hd_list[-1]))
+            # constant g model
+            if self.FLAGS['num_layers'] == -1:
+                g_initial = np.zeros((1, constants.NUM_BASIS), dtype=np.float32)
+                g_initial[0, 0] = 1.0/constants.PRT_DEFAULT
+                self.g = tf.compat.v1.Variable(initial_value=g_initial,trainable=True,
+                                               name="g_const")
             
-            # Go from last hidden state to the outputs (g in this case)
-            fc_last = layers.FullyConnected(constants.NUM_BASIS, self.drop_prob, 
-                                           relu=False, name="last")
-            self.g = fc_last.build(hd_list[-1])
+            # 0 hidden layers, so linear regression from features to g
+            elif self.FLAGS['num_layers'] == 0:
+                fc1 = layers.FullyConnected(constants.NUM_BASIS, self.drop_prob,
+                                            relu=False, name="linear")
+                self.g = fc1.build(self.x_features)
+            
+            # regular deep learning model
+            else:
+                # Creates the first hidden state from the inputs
+                fc1 = layers.FullyConnected(self.FLAGS['num_neurons'], self.drop_prob,
+                                            name="1")
+                hd1 = fc1.build(self.x_features)
+                hd_list = [hd1, ] # list of all hidden states
+                
+                # Creates all other hidden states
+                for i in range(self.FLAGS['num_layers']-1):
+                    fc = layers.FullyConnected(self.FLAGS['num_neurons'], self.drop_prob,
+                                              name=str(i+2))
+                    hd_list.append(fc.build(hd_list[-1]))
+                
+                # Go from last hidden state to the outputs (g in this case)
+                fc_last = layers.FullyConnected(constants.NUM_BASIS, self.drop_prob, 
+                                               relu=False, name="last")
+                self.g = fc_last.build(hd_list[-1])
         
     
     def combineBasis(self):
@@ -869,20 +885,29 @@ class TBNNS():
         """
         
         # List of all properties that have to be non-negative
-        list_keys = ['num_features', 'num_layers', 'num_neurons', 'num_epochs',
+        list_keys = ['num_features', 'num_neurons', 'num_epochs',
                      'early_stop_dev', 'train_batch_size', 'eval_every', 'learning_rate',
                      'c_reg', 'c_psd', 'c_prt', 'c_neg']
-        list_defaults = [constants.NUM_FEATURES, constants.NUM_LAYERS,
-                         constants.NUM_NEURONS, constants.NUM_EPOCHS, 
-                         constants.EARLY_STOP_DEV, constants.TRAIN_BATCH_SIZE,
-                         constants.EVAL_EVERY, constants.LEARNING_RATE,
-                         constants.C_REG, constants.C_PSD, constants.C_PRT,
-                         constants.C_NEG]        
+        list_defaults = [constants.NUM_FEATURES, constants.NUM_NEURONS, 
+                         constants.NUM_EPOCHS, constants.EARLY_STOP_DEV, 
+                         constants.TRAIN_BATCH_SIZE, constants.EVAL_EVERY, 
+                         constants.LEARNING_RATE, constants.C_REG, constants.C_PSD,
+                         constants.C_PRT, constants.C_NEG]        
         for key, default in zip(list_keys, list_defaults):
             if key in self.FLAGS:                
                 assert self.FLAGS[key] >= 0, "FLAGS['{}'] can't be negative!".format(key)
             else:                
                 self.FLAGS[key] = default
+        
+        # Check num layers, which can be -1, 0, or positive
+        list_keys = ['num_layers',]
+        list_defaults = [constants.NUM_LAYERS,]        
+        for key, default in zip(list_keys, list_defaults):
+            if key in self.FLAGS:                
+                assert self.FLAGS[key] == -1 or self.FLAGS[key] >= 0, \
+                   "FLAGS['{}'] is invalid! It should either be -1, 0, or >0".format(key)
+            else:                
+                self.FLAGS[key] = default      
         
         # List of all properties that must be True or False
         list_keys = ['enforce_prt',]
@@ -909,12 +934,22 @@ class TBNNS():
             assert self.FLAGS['drop_prob'] >= 0 and self.FLAGS['drop_prob'] <= 1, \
                   "FLAGS['drop_prob'] must be between 0 and 1"
         else:
-            self.FLAGS['drop_prob'] = constants.DROP_PROB   
+            self.FLAGS['drop_prob'] = constants.DROP_PROB
+
+        # Correct some values: c_psd and c_reg must be zero if constant g model is fitted
+        if self.FLAGS['num_layers'] == -1:
+            self.FLAGS['c_psd'] = 0
+            self.FLAGS['c_reg'] = 0           
     
     
-    def printModelInfo(self):
+    def printModelInfo(self, print_values=False):
         """
         Call this function to print all flags and trainable parameters of the model.
+        
+        Arguments:
+        print_values -- optional, this bool tells the function whether the value
+                        of the trained parameters should be printed. By default it is 
+                        False.
         """
         # Prints all flags used to train the model
         print("FLAGS employed:")
@@ -927,6 +962,11 @@ class TBNNS():
         for i, v in enumerate(params):
             print("{}: {}".format(i, v.name))
             print("\t shape: {} size: {}".format(v.shape, np.prod(v.shape)))
+            if print_values:
+                v_str = np.array_str(v.eval(self._tfsession), precision=4, 
+                                     suppress_small=True)
+                v_str = v_str.replace("\n", "\n\t ")
+                print("\t {}".format(v_str))
             
         
     def assertArguments(self, loss_weight, prt_desired):
