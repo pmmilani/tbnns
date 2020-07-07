@@ -15,7 +15,7 @@ def printInfo():
     dist = get_distribution('tbnns')
     print('Welcome to TBNN-s (Tensor Basis Neural Network for Scalar Mixing) package!')
     print('Installed version: {}'.format(dist.version))
-    print('')
     print("---------------")
+    print('')
        
     return 1 # return this if everything went ok
