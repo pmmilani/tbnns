@@ -11,7 +11,7 @@ with open("README.md", 'r') as f:
 
 setup(
    name='tbnns',
-   version='0.4.0',
+   version='0.5.0',
    description='TBNN-s - Tensor Basis Neural Network for Scalar Mixing',
    license='Apache',
    long_description=long_description,
