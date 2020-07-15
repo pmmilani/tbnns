@@ -27,6 +27,7 @@ GAMMA_MIN = 0.02
 
 # Default values for some entries of the FLAGS dictionary, passed 
 # in to determine the model
+NUM_BASIS = 6
 NUM_FEATURES = 8
 NUM_LAYERS = 8
 NUM_NEURONS = 30

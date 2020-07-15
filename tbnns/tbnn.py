@@ -1,8 +1,9 @@
-#--------------------------------- tbnns.py file ---------------------------------------#
+#--------------------------------- tbnn.py file ---------------------------------------#
 """
-This file contains the definition of the TBNN-s class, which is implemented using 
-tensorflow. This is a Tensor Basis Neural Network that is meant to predict a tensorial
-diffusivity for turbulent mixing applications.
+This file contains the definition of the TBNN class, which is implemented using 
+tensorflow. This is similar to the TBNN-s, and proposed originally by Ling et al. in
+J. Fluid Mech. (2016). This is a Tensor Basis Neural Network that is meant to predict 
+the Reynolds stresses anisotropy tensor.
 """
 
 # ------------ Import statements
@@ -11,14 +12,13 @@ import numpy as np
 import joblib
 import timeit
 from tbnns.data_batcher import Batch, BatchGenerator
-from tbnns import constants, utils, nn
+from tbnns import constants, utils, layers
 
 
-class TBNNS(nn.NNBasic):
+class TBNN(NNBasic):
     """
-    This class contains definitions and methods needed for the TBNN-s class. This
-    inherits from the NNBasic class, which defines the skeleton of the class.
-    """    
+    This class contains definitions and methods needed for the TBNN class.
+    """        
     
     def constructPlaceholders(self):
         """
@@ -27,12 +27,9 @@ class TBNNS(nn.NNBasic):
         Defines:
         self.x_features -- placeholder for features (i.e. inputs to NN)
         self.tensor_basis -- placeholder for tensor basis
-        self.uc -- placeholder for the labels u'c'
-        self.eddy_visc -- placeholder for eddy viscosity
+        self.b -- placeholder for the labels, the anisotropy tensor
         self.loss_weight -- placeholder for the loss weight (which is multiplied by
-                            the L2 prediction loss element-wise)
-        self.prt_desired -- placeholder for Pr_t which is enforced exactly in
-                            the predicted diffusivity when FLAGS['enforce_prt'] is True
+                            the L2 prediction loss element-wise)        
         self.drop_prob -- placeholder for dropout probability        
         """
         
@@ -40,11 +37,8 @@ class TBNNS(nn.NNBasic):
                                      shape=[None, self.FLAGS['num_features']])
         self.tensor_basis = tf.compat.v1.placeholder(tf.float32, 
                                           shape=[None, self.FLAGS['num_basis'], 3, 3])
-        self.uc = tf.compat.v1.placeholder(tf.float32, shape=[None, 3])
-        self.gradc = tf.compat.v1.placeholder(tf.float32, shape=[None, 3])
-        self.eddy_visc = tf.compat.v1.placeholder(tf.float32, shape=[None])
+        self.b = tf.compat.v1.placeholder(tf.float32, shape=[None, 3, 3])
         self.loss_weight = tf.compat.v1.placeholder(tf.float32, shape=[None, None])
-        self.prt_desired = tf.compat.v1.placeholder(tf.float32, shape=[None])
         self.drop_prob = tf.compat.v1.placeholder_with_default(0.0, shape=())
                     
     
@@ -68,37 +62,36 @@ class TBNNS(nn.NNBasic):
             
             # 0 hidden layers, so linear regression from features to g
             elif self.FLAGS['num_layers'] == 0:
-                fc1 = nn.FullyConnected(self.FLAGS['num_basis'], self.drop_prob,
+                fc1 = layers.FullyConnected(self.FLAGS['num_basis'], self.drop_prob,
                                             relu=False, name="linear")
                 self.g = fc1.build(self.x_features)
             
             # regular deep learning model
             else:
                 # Creates the first hidden state from the inputs
-                fc1 = nn.FullyConnected(self.FLAGS['num_neurons'], self.drop_prob,
+                fc1 = layers.FullyConnected(self.FLAGS['num_neurons'], self.drop_prob,
                                             name="1")
                 hd1 = fc1.build(self.x_features)
                 hd_list = [hd1, ] # list of all hidden states
                 
                 # Creates all other hidden states
                 for i in range(self.FLAGS['num_layers']-1):
-                    fc = nn.FullyConnected(self.FLAGS['num_neurons'], self.drop_prob,
+                    fc = layers.FullyConnected(self.FLAGS['num_neurons'], self.drop_prob,
                                               name=str(i+2))
                     hd_list.append(fc.build(hd_list[-1]))
                 
                 # Go from last hidden state to the outputs (g in this case)
-                fc_last = nn.FullyConnected(self.FLAGS['num_basis'], self.drop_prob, 
+                fc_last = layers.FullyConnected(self.FLAGS['num_basis'], self.drop_prob, 
                                                relu=False, name="last")
                 self.g = fc_last.build(hd_list[-1])
         
     
     def combineBasis(self):
         """
-        Uses the coefficients g to calculate the diffusivity and the u'c'
+        Uses the coefficients g to calculate the Reynolds stress anisotropy b
         
-        Defines:
-        self.diffusivity -- diffusivity tensor, shape (None,3,3)
-        self.uc_predicted -- predicted value of u'c', shape (None,3)        
+        Defines:        
+        self.b_predicted -- predicted value of anisotropy, shape (None,3,3)        
         """
         
         with tf.compat.v1.variable_scope("bases"):        
@@ -107,34 +100,7 @@ class TBNNS(nn.NNBasic):
                                    self.tensor_basis) 
             
             # diffusivity matrix, shape [None, 3, 3]
-            self.diffusivity = tf.reduce_sum(mult_bas, axis=1)
-            
-            # shape of [None,3,1]
-            gradc_ext = tf.expand_dims(self.gradc, -1) 
-            
-            # Here, we enforce a given pr_t to the diffusivity matrix (this is passed
-            # in as gamma, potentially provided by a Random Forest model)
-            if self.FLAGS['enforce_prt']:
-                uc = tf.squeeze(tf.matmul(self.diffusivity, gradc_ext))
-                gamma_implied = ( tf.reduce_sum(self.gradc*uc, axis=1) / 
-                                  tf.reduce_sum(self.gradc*self.gradc, axis=1) )                
-                
-                # clip gamma_implied
-                gamma_implied = tf.maximum(gamma_implied, constants.GAMMA_MIN)
-                gamma_implied = tf.minimum(gamma_implied, 1.0/constants.GAMMA_MIN)
-                
-                # Edited diffusivity matrix, shape [None, 3, 3]
-                gamma_desired = 1.0/self.prt_desired
-                factor = tf.reshape(gamma_desired/gamma_implied, shape=[-1,1,1])                
-                diff_edited = self.diffusivity * factor
-                
-                # shape of [None, 3], full u'c' vector
-                self.uc_predicted = -1.0*( tf.expand_dims(self.eddy_visc,-1) *
-                                     tf.squeeze(tf.matmul(diff_edited, gradc_ext)) )
-            else:
-                # shape of [None, 3], full u'c' vector
-                self.uc_predicted = -1.0*( tf.expand_dims(self.eddy_visc,-1) *
-                                     tf.squeeze(tf.matmul(self.diffusivity, gradc_ext)) )
+            self.b_predicted = tf.reduce_sum(mult_bas, axis=1)       
         
 
     def constructLoss(self):
@@ -159,18 +125,18 @@ class TBNNS(nn.NNBasic):
             
             # Calculate the prediction loss (i.e., how bad the predicted u'c' is)
             if self.FLAGS['loss_type'] == 'log':
-                self.loss_pred = nn.lossLog(self.uc, self.uc_predicted, tf_flag=True)            
+                self.loss_pred = layers.lossLog(self.uc, self.uc_predicted, tf_flag=True)            
             if self.FLAGS['loss_type'] == 'l2':
-                self.loss_pred = nn.lossL2(self.uc, self.uc_predicted,
+                self.loss_pred = layers.lossL2(self.uc, self.uc_predicted,
                                                self.loss_weight, tf_flag=True)
             if self.FLAGS['loss_type'] == 'l1':
-                self.loss_pred = nn.lossL1(self.uc, self.uc_predicted,
+                self.loss_pred = layers.lossL1(self.uc, self.uc_predicted,
                                                self.loss_weight, tf_flag=True)
             if self.FLAGS['loss_type'] == 'l2k':
-                self.loss_pred = nn.lossL2k(self.uc, self.uc_predicted, 
+                self.loss_pred = layers.lossL2k(self.uc, self.uc_predicted, 
                                                 self.loss_weight, tf_flag=True)
             if self.FLAGS['loss_type'] == 'cos':
-                self.loss_pred = nn.lossCos(self.uc, self.uc_predicted, tf_flag=True)            
+                self.loss_pred = layers.lossCos(self.uc, self.uc_predicted, tf_flag=True)            
             
             # Calculate the L2 regularization component of the loss            
             if self.FLAGS['c_reg'] == 0: self.loss_reg = tf.constant(0.0)
@@ -223,7 +189,42 @@ class TBNNS(nn.NNBasic):
                          + self.FLAGS['c_psd']*self.loss_psd
                          + self.FLAGS['c_prt']*self.loss_prt
                          + self.FLAGS['c_neg']*self.loss_neg)
-      
+            
+
+    def runTrainIter(self, batch):
+        """
+        This performs a single training iteration (forward pass, loss computation,
+        backprop, parameter update)
+
+        Inputs:        
+        batch -- a Batch object containing information necessary for training         
+
+        Returns:
+        loss -- the loss (averaged across the batch) for this batch.
+        global_step -- the current number of training iterations we have done        
+        """
+        # Match up our input data with the placeholders
+        input_feed = {}
+        input_feed[self.x_features] = batch.x_features
+        input_feed[self.tensor_basis] = batch.tensor_basis
+        input_feed[self.uc] = batch.uc
+        input_feed[self.gradc] = batch.gradc        
+        input_feed[self.eddy_visc] = batch.eddy_visc       
+        input_feed[self.drop_prob] = self.FLAGS['drop_prob'] # apply dropout
+        
+        if batch.loss_weight is not None:
+            input_feed[self.loss_weight] = batch.loss_weight        
+        if batch.prt_desired is not None: 
+            input_feed[self.prt_desired] = batch.prt_desired
+                                    
+        # output_feed contains the things we want to fetch.
+        output_feed = [self.updates, self.loss, self.global_step]
+
+        # Run the model
+        [_, loss, global_step] = self._tfsession.run(output_feed, input_feed)
+
+        return loss, global_step
+        
     
     def getLoss(self, batch):
         """
@@ -292,41 +293,6 @@ class TBNNS(nn.NNBasic):
         [diff, g] = self._tfsession.run(output_feed, input_feed)
         
         return diff, g
-        
-    
-    def runTrainIter(self, batch):
-        """
-        This performs a single training iteration (forward pass, loss computation,
-        backprop, parameter update)
-
-        Inputs:        
-        batch -- a Batch object containing information necessary for training         
-
-        Returns:
-        loss -- the loss (averaged across the batch) for this batch.
-        global_step -- the current number of training iterations we have done        
-        """
-        # Match up our input data with the placeholders
-        input_feed = {}
-        input_feed[self.x_features] = batch.x_features
-        input_feed[self.tensor_basis] = batch.tensor_basis
-        input_feed[self.uc] = batch.uc
-        input_feed[self.gradc] = batch.gradc        
-        input_feed[self.eddy_visc] = batch.eddy_visc       
-        input_feed[self.drop_prob] = self.FLAGS['drop_prob'] # apply dropout
-        
-        if batch.loss_weight is not None:
-            input_feed[self.loss_weight] = batch.loss_weight        
-        if batch.prt_desired is not None: 
-            input_feed[self.prt_desired] = batch.prt_desired
-                                    
-        # output_feed contains the things we want to fetch.
-        output_feed = [self.updates, self.loss, self.global_step]
-
-        # Run the model
-        [_, loss, global_step] = self._tfsession.run(output_feed, input_feed)
-
-        return loss, global_step
     
     
     def getTotalLosses(self, x_features, tensor_basis, uc, gradc, eddy_visc,
@@ -475,7 +441,7 @@ class TBNNS(nn.NNBasic):
     
         num_points = test_x_features.shape[0]
         total_diff = np.empty((num_points, 3, 3))
-        total_g = np.empty((num_points, self.FLAGS['num_basis']))        
+        total_g = np.empty((num_points, constants.NUM_BASIS))        
         i = 0 # marks the index where the current batch starts       
         
         # This normalizes the inputs. Runs when normalize = True
@@ -741,15 +707,15 @@ class TBNNS(nn.NNBasic):
         
         # return appropriate loss here        
         if self.FLAGS['loss_type'] == 'log':
-            loss_pred = nn.lossLog(uc, uc_rans)        
+            loss_pred = layers.lossLog(uc, uc_rans)        
         if self.FLAGS['loss_type'] == 'l2':
-            loss_pred = nn.lossL2(uc, uc_rans, loss_weight)
+            loss_pred = layers.lossL2(uc, uc_rans, loss_weight)
         if self.FLAGS['loss_type'] == 'l1':
-            loss_pred = nn.lossL1(uc, uc_rans, loss_weight)
+            loss_pred = layers.lossL1(uc, uc_rans, loss_weight)
         if self.FLAGS['loss_type'] == 'l2k':
-            loss_pred = nn.lossL2k(uc, uc_rans, loss_weight)
+            loss_pred = layers.lossL2k(uc, uc_rans, loss_weight)
         if self.FLAGS['loss_type'] == 'cos':
-            loss_pred = nn.lossCos(uc, uc_rans)
+            loss_pred = layers.lossCos(uc, uc_rans)
         
         # pr_t loss
         loss_prt = np.mean((log_gamma-np.log(1.0/prt_default))**2)
@@ -768,14 +734,14 @@ class TBNNS(nn.NNBasic):
         """
         
         # List of all properties that have to be non-negative
-        list_keys = ['num_basis', 'num_features', 'num_neurons', 'num_epochs',
+        list_keys = ['num_features', 'num_neurons', 'num_epochs',
                      'early_stop_dev', 'train_batch_size', 'eval_every', 'learning_rate',
                      'c_reg', 'c_psd', 'c_prt', 'c_neg']
-        list_defaults = [constants.NUM_BASIS, constants.NUM_FEATURES, 
-                         constants.NUM_NEURONS, constants.NUM_EPOCHS, 
-                         constants.EARLY_STOP_DEV, constants.TRAIN_BATCH_SIZE, 
-                         constants.EVAL_EVERY, constants.LEARNING_RATE, constants.C_REG,
-                         constants.C_PSD, constants.C_PRT, constants.C_NEG]        
+        list_defaults = [constants.NUM_FEATURES, constants.NUM_NEURONS, 
+                         constants.NUM_EPOCHS, constants.EARLY_STOP_DEV, 
+                         constants.TRAIN_BATCH_SIZE, constants.EVAL_EVERY, 
+                         constants.LEARNING_RATE, constants.C_REG, constants.C_PSD,
+                         constants.C_PRT, constants.C_NEG]        
         for key, default in zip(list_keys, list_defaults):
             if key in self.FLAGS:                
                 assert self.FLAGS[key] >= 0, "FLAGS['{}'] can't be negative!".format(key)
@@ -823,7 +789,7 @@ class TBNNS(nn.NNBasic):
         if self.FLAGS['num_layers'] == -1:
             self.FLAGS['c_psd'] = 0
             self.FLAGS['c_reg'] = 0
-            
+    
         
     def assertArguments(self, loss_weight, prt_desired):
         """
