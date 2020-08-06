@@ -4,7 +4,9 @@ This package implements the vanilla Tensor Basis Neural Network [1]
 as the TBNN class, and also the Tensor Basis Neural Network for
 Scalar Flux Modeling [2] as the TBNNS class. They are described in
 the following references:
+
 [1] Ling, Kurzawski, Templeton. "Reynolds averaged turbulence modelling using deep neural networks with embedded invariance." J. Fluid Mech. 807 (2016)
+
 [2] Milani, Ling, Eaton. "Turbulent scalar flux in inclined jets in crossflow: counter gradient transport and deep learning modelling" J. Fluid Mech. (under review) 
 
 Author: Pedro M. Milani (email: pmmilani@stanford.edu)
