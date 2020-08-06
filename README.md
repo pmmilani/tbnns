@@ -2,7 +2,7 @@
 
 Author: Pedro M. Milani (email: pmmilani@stanford.edu)
 
-Last modified: 07/13/2020
+Last modified: 08/06/2020
 
 Developed and tested in Python 3.7 using tensorflow 1.15
 
