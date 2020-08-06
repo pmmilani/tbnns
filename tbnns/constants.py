@@ -37,6 +37,7 @@ TRAIN_BATCH_SIZE = 50 # batch size for training
 EVAL_EVERY = 1000 # every this many iterations, check losses
 LEARNING_RATE = 1e-3 # default learning rate for Adam
 LOSS_TYPE = 'log' # loss_type
+LOSS_TYPE_TBNN = 'l2' # default loss_type for the TBNN
 C_REG = 5e-3 # regularization strength
 C_PSD = 0.25 # factor for the PSD loss (J_PSD)
 C_PRT = 0 # factor for the Pr_t loss (J_PRT)

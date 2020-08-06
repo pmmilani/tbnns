@@ -12,10 +12,10 @@ import numpy as np
 import joblib
 import timeit
 from tbnns.data_batcher import Batch, BatchGenerator
-from tbnns import constants, utils, layers
+from tbnns import constants, utils, nn, momentum_losses
 
 
-class TBNN(NNBasic):
+class TBNN(nn.NNBasic):
     """
     This class contains definitions and methods needed for the TBNN class.
     """        
@@ -38,7 +38,8 @@ class TBNN(NNBasic):
         self.tensor_basis = tf.compat.v1.placeholder(tf.float32, 
                                           shape=[None, self.FLAGS['num_basis'], 3, 3])
         self.b = tf.compat.v1.placeholder(tf.float32, shape=[None, 3, 3])
-        self.loss_weight = tf.compat.v1.placeholder(tf.float32, shape=[None, None])
+        self.loss_weight = tf.compat.v1.placeholder_with_default(tf.ones([1, 1, 1]),
+                                                                shape=[None, None, None])
         self.drop_prob = tf.compat.v1.placeholder_with_default(0.0, shape=())
                     
     
@@ -62,26 +63,26 @@ class TBNN(NNBasic):
             
             # 0 hidden layers, so linear regression from features to g
             elif self.FLAGS['num_layers'] == 0:
-                fc1 = layers.FullyConnected(self.FLAGS['num_basis'], self.drop_prob,
+                fc1 = nn.FullyConnected(self.FLAGS['num_basis'], self.drop_prob,
                                             relu=False, name="linear")
                 self.g = fc1.build(self.x_features)
             
             # regular deep learning model
             else:
                 # Creates the first hidden state from the inputs
-                fc1 = layers.FullyConnected(self.FLAGS['num_neurons'], self.drop_prob,
+                fc1 = nn.FullyConnected(self.FLAGS['num_neurons'], self.drop_prob,
                                             name="1")
                 hd1 = fc1.build(self.x_features)
                 hd_list = [hd1, ] # list of all hidden states
                 
                 # Creates all other hidden states
                 for i in range(self.FLAGS['num_layers']-1):
-                    fc = layers.FullyConnected(self.FLAGS['num_neurons'], self.drop_prob,
+                    fc = nn.FullyConnected(self.FLAGS['num_neurons'], self.drop_prob,
                                               name=str(i+2))
                     hd_list.append(fc.build(hd_list[-1]))
                 
                 # Go from last hidden state to the outputs (g in this case)
-                fc_last = layers.FullyConnected(self.FLAGS['num_basis'], self.drop_prob, 
+                fc_last = nn.FullyConnected(self.FLAGS['num_basis'], self.drop_prob, 
                                                relu=False, name="last")
                 self.g = fc_last.build(hd_list[-1])
         
@@ -108,89 +109,67 @@ class TBNN(NNBasic):
         Add loss computation to the graph. 
 
         Defines:
-        self.loss_pred -- scalar with the loss due to error between uc_predicted and uc
-        self.loss_reg -- scalar with the regularization loss
-        self.loss_psd -- scalar with the component of the loss that penalizes non-PSD
-                         diffusivity matrices, J_PSD
-        self.loss_prt -- scalar with the component of the loss that tries to match
-                         implied Pr_t with the LES-extracted Pr_t
-        self.loss_neg -- scalar with the component of the loss that penalizes magnitude
-                         of the turbulent diffusivity matrix in regions of counter
-                         gradient diffusion
+        self.loss_pred -- scalar with the loss due to error between b_predicted and b
+        self.loss_reg -- scalar with the regularization loss        
         self.loss -- scalar with the total loss (sum of all components), which is
                      what gradient descent tries to minimize
         """
         
         with tf.compat.v1.variable_scope("losses"):
             
-            # Calculate the prediction loss (i.e., how bad the predicted u'c' is)
-            if self.FLAGS['loss_type'] == 'log':
-                self.loss_pred = layers.lossLog(self.uc, self.uc_predicted, tf_flag=True)            
+                    
             if self.FLAGS['loss_type'] == 'l2':
-                self.loss_pred = layers.lossL2(self.uc, self.uc_predicted,
+                self.loss_pred = momentum_losses.lossL2(self.b, self.b_predicted,
                                                self.loss_weight, tf_flag=True)
             if self.FLAGS['loss_type'] == 'l1':
-                self.loss_pred = layers.lossL1(self.uc, self.uc_predicted,
-                                               self.loss_weight, tf_flag=True)
-            if self.FLAGS['loss_type'] == 'l2k':
-                self.loss_pred = layers.lossL2k(self.uc, self.uc_predicted, 
-                                                self.loss_weight, tf_flag=True)
-            if self.FLAGS['loss_type'] == 'cos':
-                self.loss_pred = layers.lossCos(self.uc, self.uc_predicted, tf_flag=True)            
+                self.loss_pred = momentum_losses.lossL1(self.b, self.b_predicted,
+                                               self.loss_weight, tf_flag=True)                 
             
             # Calculate the L2 regularization component of the loss            
             if self.FLAGS['c_reg'] == 0: self.loss_reg = tf.constant(0.0)
             else:
                 vars = tf.compat.v1.trainable_variables()
                 self.loss_reg = \
-                     tf.add_n([tf.nn.l2_loss(v) for v in vars if ('bias' not in v.name)]) 
-            
-            # Calculate J_PSD, the loss that enforces predicted diffusivity is PSD            
-            if self.FLAGS['c_psd'] == 0: self.loss_psd = tf.constant(0.0)
-            else:
-                diff_sym = 0.5*(self.diffusivity + 
-                                tf.linalg.matrix_transpose(self.diffusivity))
-                                
-                # e contains eigenvalues of symmetric part, in non-decreasing order
-                e, _ = tf.linalg.eigh(diff_sym) 
-                self.loss_psd = tf.reduce_mean(tf.maximum(-tf.reduce_min(e,axis=1),0))               
-            
-            # Calculate J_PRT, the loss that tries to match implied Pr_t with LES Pr_t
-            if self.FLAGS['c_prt'] == 0: self.loss_prt = tf.constant(0.0)
-            else:
-                log_gamma_implied = utils.calculateLogGamma(self.uc_predicted,
-                                                            self.gradc, self.eddy_visc,
-                                                            tf_flag=True)
-                log_gamma_les = utils.calculateLogGamma(self.uc, self.gradc, 
-                                                        self.eddy_visc, tf_flag=True)
-                self.loss_prt = tf.reduce_mean((log_gamma_implied-log_gamma_les)**2)                
-            
-            # Calculate J_NEG, the loss that penalizes the diffusivity magnitude in 
-            # regions of negative diffusivity
-            if self.FLAGS['c_neg'] == 0: self.loss_neg = tf.constant(0.0)            
-            else:
-                # appropriate norm of the diffusivity matrix
-                diff_norm = tf.norm(self.diffusivity, ord=2, axis=[1,2])
-
-                # flag that indicates if the given points have counter gradient transport
-                ctr_grad_flag = tf.math.greater_equal(tf.reduce_sum(self.uc*self.gradc,
-                                                                    axis=1), 0)                
-                # take the mean of the diffusivity norm in locations where there is 
-                # counter gradient transport. tf.cond is used to return zero if no points
-                # contain counter gradient transport
-                self.loss_neg = tf.cond(tf.reduce_any(ctr_grad_flag), 
-                                  lambda: tf.reduce_mean(tf.boolean_mask(diff_norm,
-                                                                         ctr_grad_flag)),
-                                  lambda: tf.constant(0.0) )                
+                     tf.add_n([tf.nn.l2_loss(v) for v in vars if ('bias' not in v.name)])            
+                            
             
             # Loss is the sum of different components
             self.loss = (self.loss_pred 
-                         + self.FLAGS['c_reg']*self.loss_reg
-                         + self.FLAGS['c_psd']*self.loss_psd
-                         + self.FLAGS['c_prt']*self.loss_prt
-                         + self.FLAGS['c_neg']*self.loss_neg)
+                         + self.FLAGS['c_reg']*self.loss_reg)
             
+    
+    def getLoss(self, batch):
+        """
+        This runs a single forward pass and obtains the loss.
+        
+        Inputs:        
+        batch -- a Batch object containing information necessary for training         
+        
+        Returns:
+        loss -- the loss (averaged across the batch) for this batch.
+        loss_pred -- the loss just due to the error between b and b_predicted
+        loss_reg -- the regularization component of the loss
+        """
+        
+        input_feed = {}
+        input_feed[self.x_features] = batch.x_features
+        input_feed[self.tensor_basis] = batch.tensor_basis
+        input_feed[self.b] = batch.b        
+        
+        if batch.loss_weight is not None:
+            while len(batch.loss_weight.shape) < 3:
+                batch.loss_weight = np.expand_dims(batch.loss_weight,-1)
+            input_feed[self.loss_weight] = batch.loss_weight       
+                                
+        # output_feed contains the things we want to fetch.
+        output_feed = [self.loss, self.loss_pred, self.loss_reg]        
+        
+        # Run the model
+        [loss, loss_pred, loss_reg] = self._tfsession.run(output_feed, input_feed)
 
+        return loss, loss_pred, loss_reg
+        
+    
     def runTrainIter(self, batch):
         """
         This performs a single training iteration (forward pass, loss computation,
@@ -207,97 +186,26 @@ class TBNN(NNBasic):
         input_feed = {}
         input_feed[self.x_features] = batch.x_features
         input_feed[self.tensor_basis] = batch.tensor_basis
-        input_feed[self.uc] = batch.uc
-        input_feed[self.gradc] = batch.gradc        
-        input_feed[self.eddy_visc] = batch.eddy_visc       
+        input_feed[self.b] = batch.b
         input_feed[self.drop_prob] = self.FLAGS['drop_prob'] # apply dropout
         
         if batch.loss_weight is not None:
+            while len(batch.loss_weight.shape) < 3:
+                batch.loss_weight = np.expand_dims(batch.loss_weight,-1)
             input_feed[self.loss_weight] = batch.loss_weight        
-        if batch.prt_desired is not None: 
-            input_feed[self.prt_desired] = batch.prt_desired
-                                    
+                                            
         # output_feed contains the things we want to fetch.
         output_feed = [self.updates, self.loss, self.global_step]
 
         # Run the model
         [_, loss, global_step] = self._tfsession.run(output_feed, input_feed)
 
-        return loss, global_step
-        
-    
-    def getLoss(self, batch):
-        """
-        This runs a single forward pass and obtains the loss.
-        
-        Inputs:        
-        batch -- a Batch object containing information necessary for training         
-        
-        Returns:
-        loss -- the loss (averaged across the batch) for this batch.
-        loss_pred -- the loss just due to the error between u'c' and u'c'_predicted
-        loss_reg -- the regularization component of the loss
-        loss_psd -- component of the loss that penalizes non-PSD
-                         diffusivity matrices, J_PSD
-        loss_prt -- component of the loss that tries to match
-                         implied Pr_t with the LES-extracted Pr_t
-        loss_neg -- component of the loss that penalizes magnitude
-                         of the turbulent diffusivity matrix in regions of counter
-                         gradient diffusion 
-        """
-        
-        input_feed = {}
-        input_feed[self.x_features] = batch.x_features
-        input_feed[self.tensor_basis] = batch.tensor_basis
-        input_feed[self.uc] = batch.uc
-        input_feed[self.gradc] = batch.gradc        
-        input_feed[self.eddy_visc] = batch.eddy_visc
-        
-        if batch.loss_weight is not None:
-            input_feed[self.loss_weight] = batch.loss_weight        
-        if batch.prt_desired is not None: 
-            input_feed[self.prt_desired] = batch.prt_desired
-                                
-        # output_feed contains the things we want to fetch.
-        output_feed = [self.loss, self.loss_pred, self.loss_reg, self.loss_psd,
-                       self.loss_prt, self.loss_neg]        
-        
-        # Run the model
-        [loss, loss_pred, loss_reg, loss_psd,  
-        loss_prt, loss_neg] = self._tfsession.run(output_feed, input_feed)
-
-        return loss, loss_pred, loss_reg, loss_psd, loss_prt, loss_neg
-        
-        
-    def getDiffusivity(self, batch):
-        """
-        This runs a single forward pass to obtain the (dimensionless) diffusivity matrix.
-        
-        Inputs:        
-        batch -- a Batch object containing information necessary for testing         
-
-        Returns:
-        diff -- the diffusivity tensor for this batch, a numpy array of shape (None,3,3)
-        g -- the coefficient multiplying each tensor basis, a numpy array of 
-             shape (None,num_basis)        
-        """
-        
-        input_feed = {}
-        input_feed[self.x_features] = batch.x_features        
-        input_feed[self.tensor_basis] = batch.tensor_basis       
-                        
-        # output_feed contains the things we want to fetch.
-        output_feed = [self.diffusivity, self.g]
-        
-        # Run the model
-        [diff, g] = self._tfsession.run(output_feed, input_feed)
-        
-        return diff, g
+        return loss, global_step    
     
     
-    def getTotalLosses(self, x_features, tensor_basis, uc, gradc, eddy_visc,
-                       loss_weight=None, prt_desired=None, normalize=True, 
-                       downsample=None, report_psd=False):
+    def getTotalLosses(self, x_features, tensor_basis, b,
+                       loss_weight=None, normalize=True, downsample=None,
+                       report_real=False):
         """
         This method takes in a whole dataset and computes the average loss on it.
         
@@ -306,53 +214,36 @@ class TBNN(NNBasic):
                       (num_points, num_features).
         tensor_basis -- numpy array containing the tensor basis in the whole dataset, of
                         shape (num_points, num_basis, 3, 3).
-        uc -- numpy array containing the label (uc vector) in the whole dataset, of
-                        shape (num_points, 3).
-        gradc -- numpy array containing the gradient of c vector in the whole dataset, of
-                        shape (num_points, 3).
-        eddy_visc -- numpy array containing the eddy viscosity in the whole dataset, of
-                        shape (num_points).
-        loss_weight -- numpy array of shape (num_points) or (num_points, 1) or 
-                       (num_points, 3). This weights each point and possibly each 
-                       component differently when assessing the predicted turbulent
-                       scalar flux. Optional, only needed for specific loss types.
-        prt_desired -- numpy array of shape(num_points) containing the desired Pr_t to
-                       enforce exactly at each point when FLAGS['enforce_prt']=True.
-                       Optional, only required when FLAGS['enforce_prt']=True.
+        b -- numpy array containing the label (anisotropy tensor, b_ij) in the whole
+             dataset, of shape (num_points, 3, 3).        
+        loss_weight -- numpy array of shape (num_points) or (num_points, 1, 1) or 
+                       (num_points, 3, 3). This weights each point and possibly each 
+                       component differently when assessing the predicted anisotropy
+                       tensor. Optional, no weighting applied when this is None.        
         normalize -- optional argument, boolean flag saying whether to normalize the 
                      features before feeding them to the neural network. True by default.
         downsample -- optional argument, ratio of points to use of the overall dataset.
                      If None, deactivate (and use all points). Must be between 0 and 1 
                      otherwise.
-        report_psd -- optional argument, boolean flag containing whether to return 
-                      the ratio of non-psd matrices in the predicted diffusivities
+        report_real -- optional argument, boolean flag containing whether to return 
+                       the ratio of non-realizable anisotropy tensors
         
         Returns:
         total_loss -- a scalar, the average total loss for the whole dataset
         total_loss_pred -- a scalar, the average prediction loss for the whole dataset
         total_loss_reg -- a scalar, the average regularization loss for the whole dataset
-        total_loss_psd -- a scalar, the average PSD diffusivity loss for the whole
-                          dataset
-        total_loss_prt -- a scalar, the average Pr_t diffusivity loss for the whole
-                          dataset
-        total_loss_neg -- a scalar, the average negative diffusivity loss for the whole
-                          dataset
-        total_loss_gamma -- a scalar, the average gamma loss for the whole dataset
-        ratio_eig -- a scalar, the ratio of non-PSD matrices in the output of the model.
-                     This is only calculated if report_psd==True; otherwise, it just 
-                     contains None.
+        ratio_eig -- a scalar, the ratio of non-realizable anisotropy tensors in the
+                     output of the model. This is only calculated if report_real==True;
+                     otherwise, it just contains None.
         """
         
-        # Make sure it is only None if appropriate flags are set
-        self.assertArguments(loss_weight, prt_desired)
+        # Make sure flags are consistent with arguments passed in
+        self.assertArguments()
 
         # Initializes quantities we need to keep track of
         total_loss = 0
         total_loss_pred = 0
-        total_loss_reg = 0
-        total_loss_psd = 0
-        total_loss_prt = 0
-        total_loss_neg = 0        
+        total_loss_reg = 0            
         num_points = x_features.shape[0]
         
         # This normalizes the inputs. Runs when normalize = True
@@ -361,121 +252,55 @@ class TBNN(NNBasic):
         
         # Initialize batch generator, downsampling only if not None        
         idx = utils.downsampleIdx(num_points, downsample)
-        if loss_weight is not None: loss_weight = loss_weight[idx]
-        if prt_desired is not None: prt_desired = prt_desired[idx]
+        if loss_weight is not None: loss_weight = loss_weight[idx]        
         batch_gen = BatchGenerator(constants.TEST_BATCH_SIZE, x_features[idx,:], 
-                                   tensor_basis[idx,:,:,:], uc[idx,:], gradc[idx,:],
-                                   eddy_visc[idx], loss_weight, prt_desired)             
+                                   tensor_basis[idx,:,:,:], b=b[idx,:,:], 
+                                   loss_weight=loss_weight)             
         
         # Iterate through all batches of data
         batch = batch_gen.nextBatch()        
         while batch is not None:
-            l, l_pred, l_reg, l_psd, l_prt, l_neg = self.getLoss(batch)
+            l, l_pred, l_reg = self.getLoss(batch)
             total_loss += l * batch.x_features.shape[0]
             total_loss_pred += l_pred * batch.x_features.shape[0]
-            total_loss_reg += l_reg * batch.x_features.shape[0]
-            total_loss_psd += l_psd * batch.x_features.shape[0]
-            total_loss_prt += l_prt * batch.x_features.shape[0]
-            total_loss_neg += l_neg * batch.x_features.shape[0]            
+            total_loss_reg += l_reg * batch.x_features.shape[0]                      
             batch = batch_gen.nextBatch()
         
         # To get an average loss, divide by total number of dev points
         total_loss =  total_loss/num_points
         total_loss_pred = total_loss_pred/num_points
         total_loss_reg = total_loss_reg/num_points
-        total_loss_psd = total_loss_psd/num_points
-        total_loss_prt = total_loss_prt/num_points
-        total_loss_neg = total_loss_neg/num_points                
+
+        # Report the number of non-realizable matrices        
+        if report_real:
+            b_pred, _ = self.getTotalAnisotropy(x_features, tensor_basis,                                                
+                                                normalize=False, clean=False)            
+            mask = np.zeros(b_pred.shape[0], dtype=bool)
+            for i in range(3):
+                for j in range(3):
+                    if i == j:
+                        mask = mask + (b_pred[:,i,j] > 2.0/3)
+                        mask = mask + (b_pred[:,i,j] < -1.0/3)
+                    else:
+                        mask = mask + (b_pred[:,i,j] > 0.5)
+                        mask = mask + (b_pred[:,i,j] < -0.5)
+            eig_all, _ = np.linalg.eigh(b_pred)
+            mask = mask + (eig_all[:, 2] < (3.0*np.abs(eig_all[:, 1]) - eig_all[:, 1])/2.0)
+            mask = mask + (eig_all[:, 2] > 1.0/3 - eig_all[:, 1])
+            n_fail = np.sum(mask)
+            ratio_real = 1.0*n_fail/(x_features.shape[0])          
+        else: ratio_real = None
         
-        # Report the number of non-PSD matrices
-        if report_psd:
-            diff, _, = self.getTotalDiffusivity(x_features, tensor_basis,                                                
-                                                normalize=False, clean=False)
-            diff_sym = 0.5*(diff+np.transpose(diff,axes=(0,2,1)))
-            eig_all, _ = np.linalg.eigh(diff_sym)
-            eig_min = np.amin(eig_all, axis=1)
-            ratio_eig = np.sum(eig_min < 0) / eig_min.shape[0]
-        else: ratio_eig = None           
-        
-        return (total_loss, total_loss_pred, total_loss_reg, total_loss_psd,
-                total_loss_prt, total_loss_neg, ratio_eig)
-     
-     
-    def getTotalDiffusivity(self, test_x_features, test_tensor_basis, 
-                            normalize=True, clean=True, bump_diffusivity=True, 
-                            n_std=None, prt_default=None, gamma_min=None):
-        """
-        This method takes in a whole test set and computes the diffusivity matrix on it.
-        
-        Inputs:        
-        test_x_features -- numpy array containing the features in the whole dataset, of
-                           shape (num_points, num_features)
-        test_tensor_basis -- numpy array containing the tensor basis in the whole
-                             dataset, of shape (num_points, num_basis, 3, 3)        
-        normalize -- optional argument, boolean flag saying whether to normalize the 
-                     features before feeding them to the neural network. True by default.
-        clean -- optional argument, whether to clean the output diffusivity according
-                 to the function defined in utils.py. True by default.
-        bump_diffusivity -- bool, optional argument. This decides whether we bump the
-                            diagonal elements of the matrix in case the eigenvalues are 
-                            positive but small. This helps with stability, so it's True
-                            by default.
-        n_std -- number of standard deviations around the mean which is the threshold to
-                 characterize a point as an outlier. This is passed to the cleaning 
-                 function, which sets a default value for all outlier points. By default
-                 it is None, which means that the value in constants.py is used instead
-        prt_default -- optional argument, default turbulent Prandtl number to use
-                       whenever the output diffusivity is cleaned. If None, it will read
-                       from constants.py
-        gamma_min -- optional argument, minimum value of gamma = diffusivity/turbulent 
-                     viscosity allowed. Used to clean values that are positive but too
-                     close to zero. If None is passed, default value is read from 
-                     constants.py
-        
-        Returns:
-        total_diff -- dimensionless diffusivity predicted, numpy array of shape 
-                      (num_points, 3, 3)
-        total_g -- coefficients that multiply each of the tensor basis predicted, a
-                   numpy array of shape (num_points, num_basis)        
-        """
-    
-        num_points = test_x_features.shape[0]
-        total_diff = np.empty((num_points, 3, 3))
-        total_g = np.empty((num_points, constants.NUM_BASIS))        
-        i = 0 # marks the index where the current batch starts       
-        
-        # This normalizes the inputs. Runs when normalize = True
-        if self.features_mean is not None and normalize:
-            test_x_features = (test_x_features - self.features_mean)/self.features_std
-                    
-        # Initialize batch generator. We do not call reset() to avoid shuffling the batch
-        batch_gen = BatchGenerator(constants.TEST_BATCH_SIZE, test_x_features, 
-                                   test_tensor_basis)                      
-        
-        # Iterate through all batches of data
-        batch = batch_gen.nextBatch()
-        while batch is not None:
-            n_batch = batch.x_features.shape[0] # number of points in this batch            
-            total_diff[i:i+n_batch], total_g[i:i+n_batch] = self.getDiffusivity(batch)                       
-            i += n_batch
-            batch = batch_gen.nextBatch()
-        
-        # Clean the resulting diffusivity
-        if clean:
-            total_diff, total_g = utils.cleanDiffusivity(total_diff, total_g, 
-                                                         test_x_features, n_std,
-                                                         prt_default, gamma_min,
-                                                         bump_diff=bump_diffusivity)        
-        return total_diff, total_g  
-        
+        return total_loss, total_loss_pred, total_loss_reg, ratio_real
+      
     
     def train(self, path_to_saver,
-              train_x_features, train_tensor_basis, train_uc, train_gradc, train_eddy_visc,
-              dev_x_features, dev_tensor_basis, dev_uc, dev_gradc, dev_eddy_visc, 
-              train_loss_weight=None, dev_loss_weight=None,
-              train_prt_desired=None, dev_prt_desired=None,
+              train_x_features, train_tensor_basis, train_b,
+              dev_x_features, dev_tensor_basis, dev_b, 
+              train_loss_weight=None, dev_loss_weight=None,              
               early_stop_dev=None, update_stats=True, 
-              downsample_devloss=None, detailed_losses=False):
+              downsample_devloss=None, detailed_losses=False,
+              description=None, path=None):
         """
         This method trains the model.
         
@@ -486,38 +311,26 @@ class TBNN(NNBasic):
                             of shape (num_train, num_features)
         train_tensor_basis -- numpy array containing the tensor basis in the training 
                               set, of shape (num_train, num_basis, 3, 3)
-        train_uc -- numpy array containing the label (uc vector) in the training set, of
-                    shape (num_train, 3)
-        train_gradc -- numpy array containing the gradient of c vector in the training
-                       set, of shape (num_train, 3)
-        train_eddy_visc -- numpy array containing the eddy viscosity in the training set
-                           dataset, of shape (num_train)
+        train_b -- numpy array containing the label (anisotropy tensor) in the training
+                   set, of shape (num_train, 3, 3)        
         dev_x_features -- numpy array containing the features in the dev set,
                           of shape (num_dev, num_features)
         dev_tensor_basis -- numpy array containing the tensor basis in the dev 
                             set, of shape (num_dev, num_basis, 3, 3)
-        dev_uc -- numpy array containing the label (uc vector) in the dev set, of
-                  shape (num_dev, 3)
-        dev_gradc -- numpy array containing the gradient of c vector in the dev
-                     set, of shape (num_dev, 3)
-        dev_eddy_visc -- numpy array containing the eddy viscosity in the dev set
-                         dataset, of shape (num_dev)
-        train_loss_weight -- optional argument, numpy array containing the loss_weight
-                             for the training data, which is used in some types of 
-                             prediction losses. Shape (num_train) or (num_train, 1) or
-                             (num_train, 3).
-        dev_loss_weight -- optional argument, numpy array containing the loss_weight
-                           for the dev data, which is used in some types of 
-                           prediction losses. Shape (num_dev) or (num_dev, 1) or 
-                           (num_dev, 3)        
-        train_prt_desired -- numpy array of shape (num_train) containing the desired Pr_t
-                             to enforce exactly in the training data when 
-                             FLAGS['enforce_prt']=True. Optional, only required when 
-                             FLAGS['enforce_prt']=True.
-        dev_prt_desired -- numpy array of shape (num_dev) containing the desired Pr_t
-                           to enforce exactly in the dev set when 
-                           FLAGS['enforce_prt']=True. Optional, only required when 
-                           FLAGS['enforce_prt']=True.
+        dev_b -- numpy array containing the label (b tensor) in the dev set, of
+                  shape (num_dev, 3, 3)        
+        train_loss_weight -- numpy array of shape (num_points) or (num_points, 1, 1) or 
+                             (num_points, 3, 3). This contains the loss weight for the 
+                             training data; it is used to weight each point and possibly
+                             each component differently when assessing the predicted
+                             anisotropy tensor. Optional, no weighting applied when this
+                             is None.     
+        dev_loss_weight -- numpy array of shape (num_points) or (num_points, 1, 1) or 
+                           (num_points, 3, 3). This contains the loss weight for the 
+                           validation data; it is used to weight each point and possibly
+                           each component differently when assessing the predicted
+                           anisotropy tensor. Optional, no weighting applied when this
+                           is None.
         early_stop_dev -- int, optional argument. How many iterations to wait for the dev
                           loss to improve before breaking. If this is activated, then we
                           save the model that generates the best prediction dev loss even
@@ -539,7 +352,13 @@ class TBNN(NNBasic):
                             deactivates subsampling, which is default behavior.
         detailed_losses -- optional argument, boolean that determines whether the output
                            to the screen, as the model is being trained, shows detailed 
-                           information. By default, it is False.        
+                           information. By default, it is False. 
+        description -- optional argument. String, containing he description of the model 
+                       that is going to be saved to disk.
+        path -- optional argument. String, containing the path on disk in which the model
+                metadata is going to be saved using self.saveToDisk. This is the path that
+                must be fed to the self.loadFromDisk function later to recover the trained
+                model.
         
         Returns:
         best_dev_loss -- The best (prediction) loss throughout training in the dev set
@@ -549,10 +368,9 @@ class TBNN(NNBasic):
         dev_loss_list -- A list containing dev losses throughout training
         """
         
-        # Make sure it is only None if appropriate flags are set
-        self.assertArguments(train_loss_weight, train_prt_desired)
-        self.assertArguments(dev_loss_weight, dev_prt_desired)
-                       
+        # Make sure flags are consistent with arguments passed in
+        self.assertArguments()
+                               
         # If early_stop_dev is None, get value from FLAGS
         if early_stop_dev is None:
             early_stop_dev = self.FLAGS['early_stop_dev']
@@ -564,7 +382,12 @@ class TBNN(NNBasic):
         if update_stats:
             self.features_mean = np.mean(train_x_features, axis=0, keepdims=True)
             self.features_std = np.std(train_x_features, axis=0, keepdims=True)
-            train_x_features = (train_x_features - self.features_mean)/self.features_std       
+            train_x_features = (train_x_features - self.features_mean)/self.features_std
+
+        # Save to disk before starting train so we can recover everything if the code
+        # stops running in the middle of training
+        if path is not None:
+            self.saveToDisk(description=description, path=path)
         
         # Keeps track of the best dev loss
         best_dev_loss=1e10 # very high initial best loss
@@ -579,9 +402,8 @@ class TBNN(NNBasic):
         
         # Initialize batch generator
         batch_gen = BatchGenerator(self.FLAGS['train_batch_size'],
-                                   train_x_features, train_tensor_basis, train_uc,
-                                   train_gradc, train_eddy_visc,
-                                   train_loss_weight, train_prt_desired)
+                                   train_x_features, train_tensor_basis, b=train_b,
+                                   loss_weight=train_loss_weight)
         
         # This loop goes over the epochs        
         for ep in range(self.FLAGS['num_epochs']):
@@ -603,21 +425,17 @@ class TBNN(NNBasic):
                     print("Step {}. Evaluating losses:".format(step), end="", flush=True)
                     
                     losses = self.getTotalLosses(dev_x_features, dev_tensor_basis,
-                                                 dev_uc, dev_gradc, dev_eddy_visc,
-                                                 dev_loss_weight, dev_prt_desired,
-                                                 downsample=downsample_devloss,
-                                                 report_psd=detailed_losses)          
-                    (loss_dev, loss_dev_pred, loss_dev_reg, loss_dev_psd,
-                     loss_dev_prt, loss_dev_neg, ratio_psd) = losses
+                                                 dev_b, dev_loss_weight,
+                                                 downsample=downsample_devloss, 
+                                                 report_real=detailed_losses)          
+                    loss_dev, loss_dev_pred, loss_dev_reg, ratio_real = losses
                     
                     if detailed_losses:
                         print(" Exp Train: {:.3f} | Dev: {:.3f}".format(exp_loss, loss_dev)
-                              + " ({:.3f}% non-PSD matrices)".format(100*ratio_psd), flush=True)
+                              + " ({:.3f}% non-realizable matrices)".format(100*ratio_real),
+                              flush=True)
                         print("Dev breakdown -> predict: {:.3f} |".format(loss_dev_pred)
-                              + " regularize: {:.3f} |".format(loss_dev_reg)
-                              + " PSD: {:g} |".format(loss_dev_psd)
-                              + " PRT: {:g} |".format(loss_dev_prt)
-                              + " NEG: {:g}".format(loss_dev_neg), flush=True) 
+                              + " regularize: {:.3f} |".format(loss_dev_reg), flush=True) 
                     else:
                         print(" Exp Train: {:.3f} | Dev: {:.3f}".format(exp_loss, loss_dev),
                               flush=True)
@@ -655,12 +473,10 @@ class TBNN(NNBasic):
                 break                
         
         # Calculate last dev loss 
-        _, end_dev_loss, _, _, _, _, _ = self.getTotalLosses(dev_x_features, 
-                                                          dev_tensor_basis, 
-                                                          dev_uc, dev_gradc,
-                                                          dev_eddy_visc, dev_loss_weight,
-                                                          dev_prt_desired,
-                                                          downsample=downsample_devloss)
+        _, end_dev_loss, _, _ = self.getTotalLosses(dev_x_features, 
+                                                    dev_tensor_basis, 
+                                                    dev_b, dev_loss_weight,                                                          
+                                                    downsample=downsample_devloss)
         
         # save the last model if early stopping is deactivated
         if early_stop_dev == 0:
@@ -676,56 +492,40 @@ class TBNN(NNBasic):
         return best_dev_loss, end_dev_loss, step_list, train_loss_list, dev_loss_list
            
     
-    def getRansLoss(self, uc, gradc, eddy_visc, loss_weight=None, prt_default=None):
+    def getRansLoss(self, b, gradu, tke, eddy_visc, loss_weight=None):
         """
-        This function provides a baseline loss from a fixed turbulent Pr_t assumption.
+        This function provides a baseline loss from the linear eddy viscosity model.
         
         Arguments:
-        uc -- numpy array, shape (n_points, 3) containing the true (LES) u'c' vector
-        gradc -- numpy array, shape (n_points, 3) containing the gradient of scalar
-                 concentration
+        b -- numpy array, shape (n_points, 3, 3) containing the true (LES) anisotropy
+             tensor
+        gradu -- numpy array, shape (n_points, 3, 3) containing the gradient of the 
+                 mean velocity
+        tke -- numpy array, shape (n_points,) containing the turbulent kinetic energy 
+             (with units of m^2/s^2) from RANS calculation
         eddy_visc -- numpy array, shape (n_points,) containing the eddy viscosity
                      (with units of m^2/s) from RANS calculation
-        loss_weight -- numpy array of shape (num_points). Optional, only needed for
-                       specific loss types.        
-        prt_default -- optional, number containing the fixed turbulent Prandtl number
-                       to use. If None, use the value specified in constants.py
+        loss_weight -- numpy array of shape (num_points) or (num_points,1,1) or 
+                       (num_points,3,3). Optional, only needed when a specific weight
+                       is desired for the loss       
                
         Returns:
-        loss_pred -- the prediction loss from using the fixed Pr_t assumption
-        loss_prt -- the baseline Pr_t loss (J_PRT) with GDH and fixed Pr_t
-        loss_neg -- the baseline negative diffusivity loss (J_NEG) with GDH and fixed Pr_t
-        """
+        loss_pred -- the prediction loss from using the linear eddy viscosity model        
+        """        
         
-        # Calculates log(gamma) based on quantities received
-        log_gamma = utils.calculateLogGamma(uc, gradc, eddy_visc)
+        # b_rans calculated with LEVM        
+        Sij = 0.5*(gradu + np.transpose(gradu, (0,2,1)))
+        b_rans = -1.0 * np.reshape(eddy_visc/tke, (-1,1,1)) * Sij
         
-        # uc_rans calculated with fixed Pr_t
-        if prt_default is None:
-            prt_default = constants.PRT_DEFAULT        
-        uc_rans = -1.0 * (np.expand_dims(eddy_visc/prt_default, 1)) * gradc
-        
-        # return appropriate loss here        
-        if self.FLAGS['loss_type'] == 'log':
-            loss_pred = layers.lossLog(uc, uc_rans)        
+        # return appropriate loss here
         if self.FLAGS['loss_type'] == 'l2':
-            loss_pred = layers.lossL2(uc, uc_rans, loss_weight)
+            loss_pred = momentum_losses.lossL2(b, b_rans, loss_weight)
         if self.FLAGS['loss_type'] == 'l1':
-            loss_pred = layers.lossL1(uc, uc_rans, loss_weight)
-        if self.FLAGS['loss_type'] == 'l2k':
-            loss_pred = layers.lossL2k(uc, uc_rans, loss_weight)
-        if self.FLAGS['loss_type'] == 'cos':
-            loss_pred = layers.lossCos(uc, uc_rans)
+            loss_pred = momentum_losses.lossL1(b, b_rans, loss_weight)
         
-        # pr_t loss
-        loss_prt = np.mean((log_gamma-np.log(1.0/prt_default))**2)
+        return loss_pred
         
-        # negative diffusivity loss
-        loss_neg = 1.0/prt_default              
-        
-        return loss_pred, loss_prt, loss_neg
     
-            
     def checkFlags(self):
         """
         This function checks some key flags in the dictionary self.FLAGS to make
@@ -734,14 +534,13 @@ class TBNN(NNBasic):
         """
         
         # List of all properties that have to be non-negative
-        list_keys = ['num_features', 'num_neurons', 'num_epochs',
+        list_keys = ['num_basis', 'num_features', 'num_neurons', 'num_epochs',
                      'early_stop_dev', 'train_batch_size', 'eval_every', 'learning_rate',
-                     'c_reg', 'c_psd', 'c_prt', 'c_neg']
-        list_defaults = [constants.NUM_FEATURES, constants.NUM_NEURONS, 
-                         constants.NUM_EPOCHS, constants.EARLY_STOP_DEV, 
-                         constants.TRAIN_BATCH_SIZE, constants.EVAL_EVERY, 
-                         constants.LEARNING_RATE, constants.C_REG, constants.C_PSD,
-                         constants.C_PRT, constants.C_NEG]        
+                     'c_reg']
+        list_defaults = [constants.NUM_BASIS, constants.NUM_FEATURES, 
+                         constants.NUM_NEURONS, constants.NUM_EPOCHS, 
+                         constants.EARLY_STOP_DEV, constants.TRAIN_BATCH_SIZE, 
+                         constants.EVAL_EVERY, constants.LEARNING_RATE, constants.C_REG]       
         for key, default in zip(list_keys, list_defaults):
             if key in self.FLAGS:                
                 assert self.FLAGS[key] >= 0, "FLAGS['{}'] can't be negative!".format(key)
@@ -770,56 +569,108 @@ class TBNN(NNBasic):
                 
         # Check if a loss type has been passed, if not use default
         if 'loss_type' in self.FLAGS:
-            assert self.FLAGS['loss_type'] == 'log' or \
-                   self.FLAGS['loss_type'] == 'l2' or \
-                   self.FLAGS['loss_type'] == 'l1' or \
-                   self.FLAGS['loss_type'] == 'l2k' or \
-                   self.FLAGS['loss_type'] == 'cos', "FLAGS['loss_type'] is not valid!"
+            assert self.FLAGS['loss_type'] == 'l2' or \
+                   self.FLAGS['loss_type'] == 'l1', "FLAGS['loss_type'] is not valid!"
         else:            
-            self.FLAGS['loss_type'] = constants.LOSS_TYPE
+            self.FLAGS['loss_type'] = constants.LOSS_TYPE_TBNN
             
         # Check dropout rate
         if 'drop_prob' in self.FLAGS:
             assert self.FLAGS['drop_prob'] >= 0 and self.FLAGS['drop_prob'] <= 1, \
                   "FLAGS['drop_prob'] must be between 0 and 1"
         else:
-            self.FLAGS['drop_prob'] = constants.DROP_PROB
-
-        # Correct some values: c_psd and c_reg must be zero if constant g model is fitted
-        if self.FLAGS['num_layers'] == -1:
-            self.FLAGS['c_psd'] = 0
-            self.FLAGS['c_reg'] = 0
+            self.FLAGS['drop_prob'] = constants.DROP_PROB       
     
         
-    def assertArguments(self, loss_weight, prt_desired):
+    def assertArguments(self):
         """
         This function makes sure that loss_weight passed in is
         appropriate to the flags we have, i.e., they are only None if they are
         not needed.
         
-        Arguments:
-        loss_weight -- either None or a numpy array of shape (num_points) or 
-                       (num_points, 1) or (num_points, 3). This weights each point and
-                       possibly each component differently when assessing the predicted
-                       turbulent scalar flux. This function makes sure the quantity is
-                       not None when we need it.
-        prt_desired -- either None or numpy array of shape(num_points) containing the
-                       desired Pr_t to enforce exactly at each point when 
-                       FLAGS['enforce_prt']=True. This function makes sure the quantity
-                       is not None when we need it.
+        Arguments:        
+        """        
+        pass
+        
+    
+    def getAnisotropy(self, batch):
+        """
+        This runs a single forward pass to obtain the (dimensionless) anisotropy matrix.
+        
+        Inputs:        
+        batch -- a Batch object containing information necessary for testing         
+
+        Returns:
+        b -- the diffusivity tensor for this batch, a numpy array of shape (None,3,3)
+        g -- the coefficient multiplying each tensor basis, a numpy array of 
+             shape (None,num_basis)        
         """
         
-        # Check to see if we have all we need for the current configuration                   
-        if self.FLAGS['loss_type'] == 'l2' or self.FLAGS['loss_type'] == 'l2k' or \
-           self.FLAGS['loss_type'] == 'l1':
-            msg = "loss_weight cannot be None since loss_type=l2 or l2k or l1"
-            assert loss_weight is not None, msg
-            msg = "loss_weight must be always positive!"
-            assert (loss_weight > 0).all(), msg
-
-        # Check to see if we have all we need for the current configuration                   
-        if self.FLAGS['enforce_prt'] == True:
-            msg = "prt_desired cannot be None since enforce_prt=True"
-            assert prt_desired is not None, msg
-            msg = "prt_desired must be always positive!"
-            assert (prt_desired > 0).all(), msg
+        input_feed = {}
+        input_feed[self.x_features] = batch.x_features        
+        input_feed[self.tensor_basis] = batch.tensor_basis       
+                        
+        # output_feed contains the things we want to fetch.
+        output_feed = [self.b_predicted, self.g]
+        
+        # Run the model
+        [b, g] = self._tfsession.run(output_feed, input_feed)
+        
+        return b, g
+        
+    
+    def getTotalAnisotropy(self, test_x_features, test_tensor_basis, 
+                           normalize=True, clean=True, b_default_rans=None):
+        """
+        This method takes in a whole test set and computes the anisotropy tensor on it.
+        
+        Inputs:        
+        test_x_features -- numpy array containing the features in the whole dataset, of
+                           shape (num_points, num_features)
+        test_tensor_basis -- numpy array containing the tensor basis in the whole
+                             dataset, of shape (num_points, num_basis, 3, 3)        
+        normalize -- optional argument, boolean flag saying whether to normalize the 
+                     features before feeding them to the neural network. True by default.
+        clean -- optional argument, whether to clean the output diffusivity according
+                 to the function defined in utils.py. True by default.
+        b_default_rans -- numpy array containing the default anisotropy tensor in RANS.
+                          Optional, this is only used to clean the anisotropy. Shape is
+                          (num_points, 3, 3)
+        
+        Returns:
+        total_b -- dimensionless diffusivity predicted, numpy array of shape 
+                      (num_points, 3, 3)
+        total_g -- coefficients that multiply each of the tensor basis predicted, a
+                   numpy array of shape (num_points, num_basis)        
+        """
+    
+        num_points = test_x_features.shape[0]
+        total_b = np.empty((num_points, 3, 3))
+        total_g = np.empty((num_points, self.FLAGS['num_basis']))        
+        i = 0 # marks the index where the current batch starts       
+        
+        # This normalizes the inputs. Runs when normalize = True
+        if self.features_mean is not None and normalize:
+            test_x_features = (test_x_features - self.features_mean)/self.features_std
+                    
+        # Initialize batch generator. We do not call reset() to avoid shuffling the batch
+        batch_gen = BatchGenerator(constants.TEST_BATCH_SIZE, test_x_features, 
+                                   test_tensor_basis)                      
+        
+        # Iterate through all batches of data
+        batch = batch_gen.nextBatch()
+        while batch is not None:
+            n_batch = batch.x_features.shape[0] # number of points in this batch            
+            total_b[i:i+n_batch], total_g[i:i+n_batch] = self.getAnisotropy(batch)                       
+            i += n_batch
+            batch = batch_gen.nextBatch()
+        
+        # Clean the resulting diffusivity
+        if clean:
+            total_b = utils.cleanAnisotropy(total_b, test_x_features, 
+                                            b_default_rans=b_default_rans)
+        
+        return total_b, total_g
+    
+            
+    

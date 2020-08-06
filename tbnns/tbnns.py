@@ -11,7 +11,7 @@ import numpy as np
 import joblib
 import timeit
 from tbnns.data_batcher import Batch, BatchGenerator
-from tbnns import constants, utils, nn
+from tbnns import constants, utils, nn, scalar_losses
 
 
 class TBNNS(nn.NNBasic):
@@ -159,18 +159,20 @@ class TBNNS(nn.NNBasic):
             
             # Calculate the prediction loss (i.e., how bad the predicted u'c' is)
             if self.FLAGS['loss_type'] == 'log':
-                self.loss_pred = nn.lossLog(self.uc, self.uc_predicted, tf_flag=True)            
+                self.loss_pred = scalar_losses.lossLog(self.uc, self.uc_predicted, 
+                                                       tf_flag=True)            
             if self.FLAGS['loss_type'] == 'l2':
-                self.loss_pred = nn.lossL2(self.uc, self.uc_predicted,
-                                               self.loss_weight, tf_flag=True)
+                self.loss_pred = scalar_losses.lossL2(self.uc, self.uc_predicted,
+                                                      self.loss_weight, tf_flag=True)
             if self.FLAGS['loss_type'] == 'l1':
-                self.loss_pred = nn.lossL1(self.uc, self.uc_predicted,
-                                               self.loss_weight, tf_flag=True)
+                self.loss_pred = scalar_losses.lossL1(self.uc, self.uc_predicted,
+                                                      self.loss_weight, tf_flag=True)
             if self.FLAGS['loss_type'] == 'l2k':
-                self.loss_pred = nn.lossL2k(self.uc, self.uc_predicted, 
-                                                self.loss_weight, tf_flag=True)
+                self.loss_pred = scalar_losses.lossL2k(self.uc, self.uc_predicted, 
+                                                       self.loss_weight, tf_flag=True)
             if self.FLAGS['loss_type'] == 'cos':
-                self.loss_pred = nn.lossCos(self.uc, self.uc_predicted, tf_flag=True)            
+                self.loss_pred = scalar_losses.lossCos(self.uc, self.uc_predicted,
+                                                       tf_flag=True)            
             
             # Calculate the L2 regularization component of the loss            
             if self.FLAGS['c_reg'] == 0: self.loss_reg = tf.constant(0.0)
@@ -266,33 +268,7 @@ class TBNNS(nn.NNBasic):
         loss_prt, loss_neg] = self._tfsession.run(output_feed, input_feed)
 
         return loss, loss_pred, loss_reg, loss_psd, loss_prt, loss_neg
-        
-        
-    def getDiffusivity(self, batch):
-        """
-        This runs a single forward pass to obtain the (dimensionless) diffusivity matrix.
-        
-        Inputs:        
-        batch -- a Batch object containing information necessary for testing         
-
-        Returns:
-        diff -- the diffusivity tensor for this batch, a numpy array of shape (None,3,3)
-        g -- the coefficient multiplying each tensor basis, a numpy array of 
-             shape (None,num_basis)        
-        """
-        
-        input_feed = {}
-        input_feed[self.x_features] = batch.x_features        
-        input_feed[self.tensor_basis] = batch.tensor_basis       
-                        
-        # output_feed contains the things we want to fetch.
-        output_feed = [self.diffusivity, self.g]
-        
-        # Run the model
-        [diff, g] = self._tfsession.run(output_feed, input_feed)
-        
-        return diff, g
-        
+       
     
     def runTrainIter(self, batch):
         """
@@ -398,8 +374,9 @@ class TBNNS(nn.NNBasic):
         if loss_weight is not None: loss_weight = loss_weight[idx]
         if prt_desired is not None: prt_desired = prt_desired[idx]
         batch_gen = BatchGenerator(constants.TEST_BATCH_SIZE, x_features[idx,:], 
-                                   tensor_basis[idx,:,:,:], uc[idx,:], gradc[idx,:],
-                                   eddy_visc[idx], loss_weight, prt_desired)             
+                                   tensor_basis[idx,:,:,:], uc=uc[idx,:], 
+                                   gradc=gradc[idx,:], eddy_visc=eddy_visc[idx], 
+                                   loss_weight=loss_weight, prt_desired=prt_desired)             
         
         # Iterate through all batches of data
         batch = batch_gen.nextBatch()        
@@ -433,74 +410,6 @@ class TBNNS(nn.NNBasic):
         
         return (total_loss, total_loss_pred, total_loss_reg, total_loss_psd,
                 total_loss_prt, total_loss_neg, ratio_eig)
-     
-     
-    def getTotalDiffusivity(self, test_x_features, test_tensor_basis, 
-                            normalize=True, clean=True, bump_diffusivity=True, 
-                            n_std=None, prt_default=None, gamma_min=None):
-        """
-        This method takes in a whole test set and computes the diffusivity matrix on it.
-        
-        Inputs:        
-        test_x_features -- numpy array containing the features in the whole dataset, of
-                           shape (num_points, num_features)
-        test_tensor_basis -- numpy array containing the tensor basis in the whole
-                             dataset, of shape (num_points, num_basis, 3, 3)        
-        normalize -- optional argument, boolean flag saying whether to normalize the 
-                     features before feeding them to the neural network. True by default.
-        clean -- optional argument, whether to clean the output diffusivity according
-                 to the function defined in utils.py. True by default.
-        bump_diffusivity -- bool, optional argument. This decides whether we bump the
-                            diagonal elements of the matrix in case the eigenvalues are 
-                            positive but small. This helps with stability, so it's True
-                            by default.
-        n_std -- number of standard deviations around the mean which is the threshold to
-                 characterize a point as an outlier. This is passed to the cleaning 
-                 function, which sets a default value for all outlier points. By default
-                 it is None, which means that the value in constants.py is used instead
-        prt_default -- optional argument, default turbulent Prandtl number to use
-                       whenever the output diffusivity is cleaned. If None, it will read
-                       from constants.py
-        gamma_min -- optional argument, minimum value of gamma = diffusivity/turbulent 
-                     viscosity allowed. Used to clean values that are positive but too
-                     close to zero. If None is passed, default value is read from 
-                     constants.py
-        
-        Returns:
-        total_diff -- dimensionless diffusivity predicted, numpy array of shape 
-                      (num_points, 3, 3)
-        total_g -- coefficients that multiply each of the tensor basis predicted, a
-                   numpy array of shape (num_points, num_basis)        
-        """
-    
-        num_points = test_x_features.shape[0]
-        total_diff = np.empty((num_points, 3, 3))
-        total_g = np.empty((num_points, self.FLAGS['num_basis']))        
-        i = 0 # marks the index where the current batch starts       
-        
-        # This normalizes the inputs. Runs when normalize = True
-        if self.features_mean is not None and normalize:
-            test_x_features = (test_x_features - self.features_mean)/self.features_std
-                    
-        # Initialize batch generator. We do not call reset() to avoid shuffling the batch
-        batch_gen = BatchGenerator(constants.TEST_BATCH_SIZE, test_x_features, 
-                                   test_tensor_basis)                      
-        
-        # Iterate through all batches of data
-        batch = batch_gen.nextBatch()
-        while batch is not None:
-            n_batch = batch.x_features.shape[0] # number of points in this batch            
-            total_diff[i:i+n_batch], total_g[i:i+n_batch] = self.getDiffusivity(batch)                       
-            i += n_batch
-            batch = batch_gen.nextBatch()
-        
-        # Clean the resulting diffusivity
-        if clean:
-            total_diff, total_g = utils.cleanDiffusivity(total_diff, total_g, 
-                                                         test_x_features, n_std,
-                                                         prt_default, gamma_min,
-                                                         bump_diff=bump_diffusivity)        
-        return total_diff, total_g  
         
     
     def train(self, path_to_saver,
@@ -509,7 +418,8 @@ class TBNNS(nn.NNBasic):
               train_loss_weight=None, dev_loss_weight=None,
               train_prt_desired=None, dev_prt_desired=None,
               early_stop_dev=None, update_stats=True, 
-              downsample_devloss=None, detailed_losses=False):
+              downsample_devloss=None, detailed_losses=False,
+              path=None, description=None):
         """
         This method trains the model.
         
@@ -573,7 +483,13 @@ class TBNNS(nn.NNBasic):
                             deactivates subsampling, which is default behavior.
         detailed_losses -- optional argument, boolean that determines whether the output
                            to the screen, as the model is being trained, shows detailed 
-                           information. By default, it is False.        
+                           information. By default, it is False.
+        path -- optional argument. String, containing the path on disk in which the model
+                metadata is going to be saved using self.saveToDisk. This is the path that
+                must be fed to the self.loadFromDisk function later to recover the trained
+                model.
+        description -- optional argument. String, containing he description of the model 
+                       that is going to be saved to disk.
         
         Returns:
         best_dev_loss -- The best (prediction) loss throughout training in the dev set
@@ -598,7 +514,12 @@ class TBNNS(nn.NNBasic):
         if update_stats:
             self.features_mean = np.mean(train_x_features, axis=0, keepdims=True)
             self.features_std = np.std(train_x_features, axis=0, keepdims=True)
-            train_x_features = (train_x_features - self.features_mean)/self.features_std       
+            train_x_features = (train_x_features - self.features_mean)/self.features_std
+
+        # Save to disk before starting train so we can recover everything if the code
+        # stops running in the middle of training
+        if path is not None:
+            self.saveToDisk(description=description, path=path)
         
         # Keeps track of the best dev loss
         best_dev_loss=1e10 # very high initial best loss
@@ -613,9 +534,10 @@ class TBNNS(nn.NNBasic):
         
         # Initialize batch generator
         batch_gen = BatchGenerator(self.FLAGS['train_batch_size'],
-                                   train_x_features, train_tensor_basis, train_uc,
-                                   train_gradc, train_eddy_visc,
-                                   train_loss_weight, train_prt_desired)
+                                   train_x_features, train_tensor_basis, uc=train_uc,
+                                   gradc=train_gradc, eddy_visc=train_eddy_visc,
+                                   loss_weight=train_loss_weight, 
+                                   prt_desired=train_prt_desired)
         
         # This loop goes over the epochs        
         for ep in range(self.FLAGS['num_epochs']):
@@ -741,15 +663,15 @@ class TBNNS(nn.NNBasic):
         
         # return appropriate loss here        
         if self.FLAGS['loss_type'] == 'log':
-            loss_pred = nn.lossLog(uc, uc_rans)        
+            loss_pred = scalar_losses.lossLog(uc, uc_rans)        
         if self.FLAGS['loss_type'] == 'l2':
-            loss_pred = nn.lossL2(uc, uc_rans, loss_weight)
+            loss_pred = scalar_losses.lossL2(uc, uc_rans, loss_weight)
         if self.FLAGS['loss_type'] == 'l1':
-            loss_pred = nn.lossL1(uc, uc_rans, loss_weight)
+            loss_pred = scalar_losses.lossL1(uc, uc_rans, loss_weight)
         if self.FLAGS['loss_type'] == 'l2k':
-            loss_pred = nn.lossL2k(uc, uc_rans, loss_weight)
+            loss_pred = scalar_losses.lossL2k(uc, uc_rans, loss_weight)
         if self.FLAGS['loss_type'] == 'cos':
-            loss_pred = nn.lossCos(uc, uc_rans)
+            loss_pred = scalar_losses.lossCos(uc, uc_rans)
         
         # pr_t loss
         loss_prt = np.mean((log_gamma-np.log(1.0/prt_default))**2)
@@ -857,3 +779,97 @@ class TBNNS(nn.NNBasic):
             assert prt_desired is not None, msg
             msg = "prt_desired must be always positive!"
             assert (prt_desired > 0).all(), msg
+            
+    
+    def getDiffusivity(self, batch):
+        """
+        This runs a single forward pass to obtain the (dimensionless) diffusivity matrix.
+        
+        Inputs:        
+        batch -- a Batch object containing information necessary for testing         
+
+        Returns:
+        diff -- the diffusivity tensor for this batch, a numpy array of shape (None,3,3)
+        g -- the coefficient multiplying each tensor basis, a numpy array of 
+             shape (None,num_basis)        
+        """
+        
+        input_feed = {}
+        input_feed[self.x_features] = batch.x_features        
+        input_feed[self.tensor_basis] = batch.tensor_basis       
+                        
+        # output_feed contains the things we want to fetch.
+        output_feed = [self.diffusivity, self.g]
+        
+        # Run the model
+        [diff, g] = self._tfsession.run(output_feed, input_feed)
+        
+        return diff, g
+        
+        
+    def getTotalDiffusivity(self, test_x_features, test_tensor_basis, 
+                            normalize=True, clean=True, bump_diffusivity=True, 
+                            n_std=None, prt_default=None, gamma_min=None):
+        """
+        This method takes in a whole test set and computes the diffusivity matrix on it.
+        
+        Inputs:        
+        test_x_features -- numpy array containing the features in the whole dataset, of
+                           shape (num_points, num_features)
+        test_tensor_basis -- numpy array containing the tensor basis in the whole
+                             dataset, of shape (num_points, num_basis, 3, 3)        
+        normalize -- optional argument, boolean flag saying whether to normalize the 
+                     features before feeding them to the neural network. True by default.
+        clean -- optional argument, whether to clean the output diffusivity according
+                 to the function defined in utils.py. True by default.
+        bump_diffusivity -- bool, optional argument. This decides whether we bump the
+                            diagonal elements of the matrix in case the eigenvalues are 
+                            positive but small. This helps with stability, so it's True
+                            by default.
+        n_std -- number of standard deviations around the mean which is the threshold to
+                 characterize a point as an outlier. This is passed to the cleaning 
+                 function, which sets a default value for all outlier points. By default
+                 it is None, which means that the value in constants.py is used instead
+        prt_default -- optional argument, default turbulent Prandtl number to use
+                       whenever the output diffusivity is cleaned. If None, it will read
+                       from constants.py
+        gamma_min -- optional argument, minimum value of gamma = diffusivity/turbulent 
+                     viscosity allowed. Used to clean values that are positive but too
+                     close to zero. If None is passed, default value is read from 
+                     constants.py
+        
+        Returns:
+        total_diff -- dimensionless diffusivity predicted, numpy array of shape 
+                      (num_points, 3, 3)
+        total_g -- coefficients that multiply each of the tensor basis predicted, a
+                   numpy array of shape (num_points, num_basis)        
+        """
+    
+        num_points = test_x_features.shape[0]
+        total_diff = np.empty((num_points, 3, 3))
+        total_g = np.empty((num_points, self.FLAGS['num_basis']))        
+        i = 0 # marks the index where the current batch starts       
+        
+        # This normalizes the inputs. Runs when normalize = True
+        if self.features_mean is not None and normalize:
+            test_x_features = (test_x_features - self.features_mean)/self.features_std
+                    
+        # Initialize batch generator. We do not call reset() to avoid shuffling the batch
+        batch_gen = BatchGenerator(constants.TEST_BATCH_SIZE, test_x_features, 
+                                   test_tensor_basis)                      
+        
+        # Iterate through all batches of data
+        batch = batch_gen.nextBatch()
+        while batch is not None:
+            n_batch = batch.x_features.shape[0] # number of points in this batch            
+            total_diff[i:i+n_batch], total_g[i:i+n_batch] = self.getDiffusivity(batch)                       
+            i += n_batch
+            batch = batch_gen.nextBatch()
+        
+        # Clean the resulting diffusivity
+        if clean:
+            total_diff, total_g = utils.cleanDiffusivity(total_diff, total_g, 
+                                                         test_x_features, n_std,
+                                                         prt_default, gamma_min,
+                                                         bump_diff=bump_diffusivity)        
+        return total_diff, total_g  
