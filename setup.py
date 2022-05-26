@@ -19,7 +19,7 @@ setup(
    author_email='pmmilani@stanford.edu',
    url="https://github.com/pmmilani/tbnns.git",
    packages=['tbnns'],  # same as name
-   install_requires=['tensorflow==1.15.2', 'joblib'], # dependencies
+   install_requires=['tensorflow==2.7.2', 'joblib'], # dependencies
    python_requires='>=3.6',
    classifiers=[
         "Programming Language :: Python :: 3.7"
